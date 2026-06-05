@@ -1,0 +1,16 @@
+app:
+  name: mc-lookup
+  env: dev
+
+redis:
+  addr: localhost:6379
+  password: ""
+  db: 0
+
+resolver:
+  timeout: 5
+  user_agent: "mc-lookup/1.0"
+
+cache:
+  ttl: 3600
+  prefix: "mc-lookup:"
