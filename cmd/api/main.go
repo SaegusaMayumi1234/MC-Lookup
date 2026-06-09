@@ -2,11 +2,20 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"log/slog"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
+	"github.com/saegusamayumi1234/mc-lookup/internal/api"
 	"github.com/saegusamayumi1234/mc-lookup/internal/cache"
 	"github.com/saegusamayumi1234/mc-lookup/internal/config"
+	"github.com/saegusamayumi1234/mc-lookup/internal/resolver"
+	"github.com/saegusamayumi1234/mc-lookup/internal/service"
 )
 
 func main() {
@@ -25,11 +34,59 @@ func main() {
 		return
 	}
 
-	cache, err := cache.NewRedisClient(ctx, cfg.Redis)
+	cache, err := cache.NewRedisClient(ctx, cache.RedisConfig(cfg.Redis))
 	if err != nil {
 		logger.Error("Failed to connect to Redis", "error", err)
 		return
 	}
 	
-	logger.Info("redis connected", "redis", cache)
+	logger.Info("redis connected")
+
+	resolvers := resolver.GetResolvers(
+		cfg.Resolver.GetResolverTimeout(),
+		cfg.Resolver.UserAgent,
+	)
+
+	logger.Info("Resolvers initialized", "count", len(resolvers), "names", resolver.ResolverNames(cfg.Resolver.GetResolverTimeout(), cfg.Resolver.UserAgent))
+
+	playerService := service.NewPlayerService(resolvers, cache, cfg.Cache.GetCacheTTL())
+
+	router := api.NewRouter(api.RouterDeps{
+		Services: api.Services{
+			Players: playerService,
+		},
+		Logger: logger,
+		Env: cfg.App.Env,
+	})
+
+	server := &http.Server{
+		Addr:         fmt.Sprintf(":%d", cfg.Api.Port),
+		Handler:      router,
+		ReadTimeout:  time.Duration(cfg.Api.ReadTimeout) * time.Second,
+		WriteTimeout: time.Duration(cfg.Api.WriteTimeout) * time.Second,
+	}
+
+	go func() {
+		logger.Info("Server listening", "url", fmt.Sprintf("http://localhost:%d", cfg.Api.Port))
+		logger.Info("API docs available", "url", fmt.Sprintf("http://localhost:%d/", cfg.Api.Port))
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("Server error", "error", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	log.Println("Shutting down server...")
+
+	// Graceful shutdown with 30 second timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(ctx); err != nil {
+		log.Fatalf("Server forced to shutdown: %v", err)
+	}
+
+	log.Println("Server stopped")
 }

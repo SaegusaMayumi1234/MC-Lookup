@@ -1,9 +1,12 @@
 package api
 
 import (
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/saegusamayumi1234/mc-lookup/internal/constant"
 )
 
 // LoggingMiddleware logs HTTP requests
@@ -34,10 +37,19 @@ func RecoveryMiddleware(logger *slog.Logger) func(next http.Handler) http.Handle
 			defer func() {
 				if err := recover(); err != nil {
 					logger.Error("PANIC", "error", err)
-					// writeJSON(w, http.StatusInternalServerError, JSONResponse{
-					// 	Success: false,
-					// 	Message: "Internal Server Error",
-					// })
+
+					w.WriteHeader(http.StatusInternalServerError)
+
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(ErrorResponse{
+						BaseResponse: BaseResponse{
+							Success: false,
+						},
+						Error: ErrorResult{
+							Code:    constant.CodeInternalServerError,
+							Message: http.StatusText(http.StatusInternalServerError),
+						},
+					})
 				}
 			}()
 

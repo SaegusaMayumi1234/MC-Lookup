@@ -2,6 +2,11 @@ app:
   name: mc-lookup
   env: dev
 
+api:
+  port: 8080
+  read_timeout: 5
+  write_timeout: 5
+
 redis:
   addr: localhost:6379
   password: ""
