@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/saegusamayumi1234/mc-lookup/internal/constant"
 	"github.com/saegusamayumi1234/mc-lookup/internal/model"
 )
 
@@ -26,7 +27,7 @@ type mojangResponse struct {
 
 func NewMojangResolver(timeout time.Duration, userAgent string) *MojangResolver {
 	return &MojangResolver{
-		BaseResolver: NewBaseResolver("mojang", timeout, userAgent),
+		BaseResolver: NewBaseResolver(constant.ResolverNameMojang, timeout, userAgent),
 	}
 }
 

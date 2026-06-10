@@ -23,7 +23,6 @@ func main() {
 		Level: slog.LevelInfo,
 		// AddSource: true,
 	}))
-
 	slog.SetDefault(logger)
 
 	ctx := context.Background()
@@ -33,23 +32,28 @@ func main() {
 		logger.Error("Failed to load config", "error", err)
 		return
 	}
+	logger.Info("config loaded", "app_name", cfg.App.Name, "env", cfg.App.Env)
 
 	cache, err := cache.NewRedisClient(ctx, cache.RedisConfig(cfg.Redis))
 	if err != nil {
 		logger.Error("Failed to connect to Redis", "error", err)
 		return
 	}
-	
 	logger.Info("redis connected")
 
-	resolvers := resolver.GetResolvers(
-		cfg.Resolver.GetResolverTimeout(),
-		cfg.Resolver.UserAgent,
-	)
+	_, activeResolverNames := cfg.Resolver.GetSelectedResolverNames()
+	resolvers := make([]resolver.Resolver, 0, len(activeResolverNames))
+	for _, name := range activeResolverNames {
+		res := resolver.GetResolverByName(name, cfg.Resolver.GetResolverTimeout(), cfg.Resolver.UserAgent)
+		if res == nil {
+			logger.Error("Resolver listed in config is not registered", "resolver", name)
+			return
+		}
+		resolvers = append(resolvers, res)
+	}
+	logger.Info("Resolvers initialized", "strategy", cfg.Resolver.Strategy, "count", len(resolvers), "names", activeResolverNames)
 
-	logger.Info("Resolvers initialized", "count", len(resolvers), "names", resolver.ResolverNames(cfg.Resolver.GetResolverTimeout(), cfg.Resolver.UserAgent))
-
-	playerService := service.NewPlayerService(resolvers, cache, cfg.Cache.GetCacheTTL())
+	playerService := service.NewPlayerService(resolvers, cfg.Resolver.Strategy, cache, cfg.Cache.GetCacheTTL())
 
 	router := api.NewRouter(api.RouterDeps{
 		Services: api.Services{
@@ -81,7 +85,7 @@ func main() {
 	log.Println("Shutting down server...")
 
 	// Graceful shutdown with 30 second timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30 * time.Second)
 	defer cancel()
 
 	if err := server.Shutdown(ctx); err != nil {

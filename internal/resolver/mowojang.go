@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/saegusamayumi1234/mc-lookup/internal/constant"
 	"github.com/saegusamayumi1234/mc-lookup/internal/model"
 )
 
@@ -26,7 +27,7 @@ type mowojangResponse struct {
 
 func NewMowojangResolver(timeout time.Duration, userAgent string) *MowojangResolver {
 	return &MowojangResolver{
-		BaseResolver: NewBaseResolver("mowojang", timeout, userAgent),
+		BaseResolver: NewBaseResolver(constant.ResolverNameMowojang, timeout, userAgent),
 	}
 }
 

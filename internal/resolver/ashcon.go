@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/saegusamayumi1234/mc-lookup/internal/constant"
 	"github.com/saegusamayumi1234/mc-lookup/internal/model"
 )
 
@@ -25,7 +26,7 @@ type ashconResponse struct {
 
 func NewAshconResolver(timeout time.Duration, userAgent string) *AshconResolver {
 	return &AshconResolver{
-		BaseResolver: NewBaseResolver("ashcon", timeout, userAgent),
+		BaseResolver: NewBaseResolver(constant.ResolverNameAshcon, timeout, userAgent),
 	}
 }
 

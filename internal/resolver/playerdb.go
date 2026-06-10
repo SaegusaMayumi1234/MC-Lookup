@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/saegusamayumi1234/mc-lookup/internal/constant"
 	"github.com/saegusamayumi1234/mc-lookup/internal/model"
 )
 
@@ -32,7 +33,7 @@ type playerDBResponse struct {
 
 func NewPlayerDBResolver(timeout time.Duration, userAgent string) *PlayerDBResolver {
 	return &PlayerDBResolver{
-		BaseResolver: NewBaseResolver("playerdb", timeout, userAgent),
+		BaseResolver: NewBaseResolver(constant.ResolverNamePlayerDB, timeout, userAgent),
 	}
 }
 

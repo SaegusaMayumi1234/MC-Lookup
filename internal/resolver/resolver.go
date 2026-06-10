@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/saegusamayumi1234/mc-lookup/internal/constant"
 	"github.com/saegusamayumi1234/mc-lookup/internal/model"
 )
 
@@ -13,31 +14,26 @@ type Resolver interface {
 	Name() string
 }
 
-// GetResolvers returns all registered resolvers
-func GetResolvers(timeout time.Duration, userAgent string) []Resolver {
-	return []Resolver{
-		NewMojangResolver(timeout, userAgent),
-		NewPlayerDBResolver(timeout, userAgent),
-		NewAshconResolver(timeout, userAgent),
-		NewMowojangResolver(timeout, userAgent),
+func GetResolverByName(name string, timeout time.Duration, userAgent string) Resolver {
+	switch name {
+	case constant.ResolverNameMojang:
+		return NewMojangResolver(timeout, userAgent)
+	case constant.ResolverNamePlayerDB:
+		return NewPlayerDBResolver(timeout, userAgent)
+	case constant.ResolverNameAshcon:
+		return NewAshconResolver(timeout, userAgent)
+	case constant.ResolverNameMowojang:
+		return NewMowojangResolver(timeout, userAgent)
+	default:
+		return nil
 	}
-}
-
-// ResolverNames returns the names of all registered resolvers
-func ResolverNames(timeout time.Duration, userAgent string) []string {
-	resolvers := GetResolvers(timeout, userAgent)
-	names := make([]string, len(resolvers))
-	for i, r := range resolvers {
-		names[i] = r.Name()
-	}
-	return names
 }
 
 // BaseResolver provides common functionality for all resolvers
 type BaseResolver struct {
-	name       string
-	client     *http.Client
-	userAgent  string
+	name      string
+	client    *http.Client
+	userAgent string
 }
 
 // NewBaseResolver creates a new base resolver with configured HTTP client

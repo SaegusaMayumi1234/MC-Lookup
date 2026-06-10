@@ -2,7 +2,10 @@ package service
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,14 +29,18 @@ type ResolveResult struct {
 
 type PlayerService struct {
 	resolvers []resolver.Resolver
+	strategy  string
 	cache     cache.Cache
 	cacheTTL  time.Duration
 	sfGroup   singleflight.Group
 }
 
-func NewPlayerService(resolvers []resolver.Resolver, c cache.Cache, cacheTTL time.Duration) *PlayerService {
+func NewPlayerService(resolvers []resolver.Resolver, strategy string, c cache.Cache, cacheTTL time.Duration) *PlayerService {
+	strategy = strings.ToLower(strings.TrimSpace(strategy))
+
 	return &PlayerService{
 		resolvers: resolvers,
+		strategy:  strategy,
 		cache:     c,
 		cacheTTL:  cacheTTL,
 	}
@@ -81,8 +88,29 @@ func (s *PlayerService) Resolve(ctx context.Context, identifier string) *Resolve
 	return res
 }
 
-// doResolve performs the actual resolution against external APIs
+// doResolve dispatches player resolution to the configured strategy.
 func (s *PlayerService) doResolve(ctx context.Context, identifier string) *ResolveResult {
+	if len(s.resolvers) == 0 {
+		return noResolversResult()
+	}
+
+	switch s.strategy {
+		case constant.StrategyFallback:
+			return s.doResolveFallback(ctx, identifier)
+		case constant.StrategyRace:
+			return s.doResolveRace(ctx, identifier)
+		default:
+			return &ResolveResult{
+				Error: &resolver.ResolverError{
+					Code:       constant.CodeInternalServerError,
+					Message:    fmt.Sprintf("invalid strategy: %q", s.strategy),
+					StatusCode: http.StatusInternalServerError,
+				},
+			}
+	}
+}
+
+func (s *PlayerService) doResolveRace(ctx context.Context, identifier string) *ResolveResult {
 	resolveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -131,20 +159,59 @@ func (s *PlayerService) doResolve(ctx context.Context, identifier string) *Resol
 		if res.err == nil && res.player != nil {
 			cancel()
 
-			res.player.UUID = model.NormalizeUUID(res.player.UUID)
-
-			s.cachePlayer(res.player, res.resolver)
-
-			return &ResolveResult{
-				Player:   res.player,
-				Resolver: res.resolver,
-				CacheHit: false,
-			}
+			return s.newSuccessfulResolveResult(res.player, res.resolver)
 		}
 
 		if res.err != nil {
 			errors = append(errors, res.err)
 		}
+	}
+
+	return aggregateResolveErrors(errors)
+}
+
+func (s *PlayerService) doResolveFallback(ctx context.Context, identifier string) *ResolveResult {
+	errors := make([]*resolver.ResolverError, 0, len(s.resolvers))
+
+	for _, res := range s.resolvers {
+		player, err := res.Resolve(ctx, identifier)
+
+		if err == nil && player != nil {
+			return s.newSuccessfulResolveResult(player, res.Name())
+		}
+
+		errors = append(errors, wrapResolverError(res.Name(), err))
+	}
+
+	return aggregateResolveErrors(errors)
+}
+
+func (s *PlayerService) newSuccessfulResolveResult(player *model.Player, resolverName string) *ResolveResult {
+	player.UUID = model.NormalizeUUID(player.UUID)
+	s.cachePlayer(player, resolverName)
+
+	return &ResolveResult{
+		Player:   player,
+		Resolver: resolverName,
+		CacheHit: false,
+	}
+}
+
+func wrapResolverError(resolverName string, err error) *resolver.ResolverError {
+	if err == nil {
+		return resolver.NewUpstreamError(resolverName, 0, errors.New("resolver returned no player"))
+	}
+
+	if re, ok := err.(*resolver.ResolverError); ok {
+		return re
+	}
+
+	return resolver.NewUpstreamError(resolverName, 0, err)
+}
+
+func aggregateResolveErrors(errors []*resolver.ResolverError) *ResolveResult {
+	if len(errors) == 0 {
+		return noResolversResult()
 	}
 
 	aggErr := resolver.AggregateErrors(errors)
@@ -155,6 +222,16 @@ func (s *PlayerService) doResolve(ctx context.Context, identifier string) *Resol
 			Message:    aggErr.FinalMessage,
 			StatusCode: aggErr.FinalStatus,
 			Details:    buildErrorDetails(errors),
+		},
+	}
+}
+
+func noResolversResult() *ResolveResult {
+	return &ResolveResult{
+		Error: &resolver.ResolverError{
+			Code:       constant.CodeNoResolversAvailable,
+			Message:    "No resolvers available",
+			StatusCode: http.StatusInternalServerError,
 		},
 	}
 }
