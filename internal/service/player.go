@@ -28,26 +28,27 @@ type ResolveResult struct {
 }
 
 type PlayerService struct {
-	resolvers []resolver.Resolver
-	strategy  string
-	cache     cache.Cache
-	cacheTTL  time.Duration
-	sfGroup   singleflight.Group
+	resolvers   []resolver.Resolver
+	strategy    string
+	cache       cache.Cache
+	cacheTTL    time.Duration
+	cachePrefix string
+	sfGroup     singleflight.Group
 }
 
-func NewPlayerService(resolvers []resolver.Resolver, strategy string, c cache.Cache, cacheTTL time.Duration) *PlayerService {
+func NewPlayerService(resolvers []resolver.Resolver, strategy string, c cache.Cache, cacheTTL time.Duration, cachePrefix string) *PlayerService {
 	strategy = strings.ToLower(strings.TrimSpace(strategy))
 
 	return &PlayerService{
-		resolvers: resolvers,
-		strategy:  strategy,
-		cache:     c,
-		cacheTTL:  cacheTTL,
+		resolvers:   resolvers,
+		strategy:    strategy,
+		cache:       c,
+		cacheTTL:    cacheTTL,
+		cachePrefix: cachePrefix,
 	}
 }
 
-// Resolve looks up a player by username or UUID using concurrent resolvers, caching and singleflight to prevent duplicate work. 
-// It returns the first successful result or an aggregated error if all fail.
+// Resolve attempts to resolve a player identifier using the configured strategy and resolvers.
 func (s *PlayerService) Resolve(ctx context.Context, identifier string) *ResolveResult {
 	if !model.IsValidIdentifier(identifier) {
 		return &ResolveResult{
@@ -95,18 +96,18 @@ func (s *PlayerService) doResolve(ctx context.Context, identifier string) *Resol
 	}
 
 	switch s.strategy {
-		case constant.StrategyFallback:
-			return s.doResolveFallback(ctx, identifier)
-		case constant.StrategyRace:
-			return s.doResolveRace(ctx, identifier)
-		default:
-			return &ResolveResult{
-				Error: &resolver.ResolverError{
-					Code:       constant.CodeInternalServerError,
-					Message:    fmt.Sprintf("invalid strategy: %q", s.strategy),
-					StatusCode: http.StatusInternalServerError,
-				},
-			}
+	case constant.StrategyFallback:
+		return s.doResolveFallback(ctx, identifier)
+	case constant.StrategyRace:
+		return s.doResolveRace(ctx, identifier)
+	default:
+		return &ResolveResult{
+			Error: &resolver.ResolverError{
+				Code:       constant.CodeInternalServerError,
+				Message:    fmt.Sprintf("invalid strategy: %q", s.strategy),
+				StatusCode: http.StatusInternalServerError,
+			},
+		}
 	}
 }
 
@@ -245,7 +246,7 @@ func buildErrorDetails(errors []*resolver.ResolverError) map[string]string {
 }
 
 func (s *PlayerService) getCachedResult(key string) *ResolveResult {
-	entry, found := s.cache.Get(key)
+	entry, found := s.cache.GetPlayerCache(s.cachePrefix, key)
 	if !found {
 		return nil
 	}
@@ -268,10 +269,9 @@ func (s *PlayerService) cachePlayer(player *model.Player, resolverName string) {
 		Username: player.Username,
 	}
 
-	s.cache.Set(model.NormalizeIdentifier(player.UUID), cacheData, resolverName, s.cacheTTL)
-	s.cache.Set(model.NormalizeIdentifier(player.Username), cacheData, resolverName, s.cacheTTL)
+	s.cache.SetPlayerCache(s.cachePrefix, cacheData, resolverName, s.cacheTTL)
 }
 
-func (s *PlayerService) GetCacheStats() cache.Stats {
-	return s.cache.Stats()
-}
+// func (s *PlayerService) GetCacheStats() cache.Stats {
+// 	return s.cache.GetPlayerCache()
+// }

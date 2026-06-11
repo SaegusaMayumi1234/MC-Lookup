@@ -53,7 +53,7 @@ func main() {
 	}
 	logger.Info("Resolvers initialized", "strategy", cfg.Resolver.Strategy, "count", len(resolvers), "names", activeResolverNames)
 
-	playerService := service.NewPlayerService(resolvers, cfg.Resolver.Strategy, cache, cfg.Cache.GetCacheTTL())
+	playerService := service.NewPlayerService(resolvers, cfg.Resolver.Strategy, cache, cfg.Cache.GetCacheTTL(), cfg.Cache.Prefix)
 
 	router := api.NewRouter(api.RouterDeps{
 		Services: api.Services{

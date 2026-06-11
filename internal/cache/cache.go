@@ -46,16 +46,19 @@ type Stats struct {
 type Cache interface {
 	// Get retrieves a player from cache by key (normalized identifier)
 	// Returns the entry and true if found and not expired, nil and false otherwise
-	Get(key string) (*Entry, bool)
+	// Get(key string) (*Entry, bool)
 
 	// Set stores a player in cache with the given TTL
-	Set(key string, p *PlayerData, resolver string, ttl time.Duration)
+	// Set(key string, data any, resolver string, ttl time.Duration)
 
 	// Delete removes an entry from cache
-	Delete(key string)
+	// Delete(key string)
 
 	// Stats returns cache statistics
-	Stats() Stats
+	// Stats() Stats
+
+	SetPlayerCache(prefix string, p *PlayerData, resolver string, ttl time.Duration)
+	GetPlayerCache(prefix string, identifier string) (*Entry, bool)
 
 	// Close closes the cache connection (for Redis)
 	Close() error
