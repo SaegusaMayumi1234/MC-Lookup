@@ -2,8 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
-	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/saegusamayumi1234/mc-lookup/internal/constant"
@@ -31,14 +31,15 @@ func (h *PlayerHandler) GetPlayer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set cache headers
+	cacheControl := fmt.Sprintf("public, max-age=%d", int64(result.CacheTTL.Seconds()))
+	cacheStatus := "MISS"
 	if result.CacheHit {
-		w.Header().Set("X-Cache-Status", "HIT")
-		w.Header().Set("X-Cache-TTL", strconv.FormatInt(int64(result.CacheTTL.Seconds()), 10))
-	} else {
-		w.Header().Set("X-Cache-Status", "MISS")
-		w.Header().Set("X-Resolver", result.Resolver)
+		cacheStatus = "HIT"
 	}
+
+	w.Header().Set("Cache-Control", cacheControl)
+	w.Header().Set("X-Cache-Status", cacheStatus)
+	w.Header().Set("X-Resolver", result.Resolver)
 
 	// Indicate if this request was coalesced with another in-flight request
 	if result.Coalesced {
