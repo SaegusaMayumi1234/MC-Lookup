@@ -10,14 +10,14 @@ import (
 )
 
 type RouterDeps struct {
-    Services Services
+	Services Services
 	Logger   *slog.Logger
-    Env      string
+	Env      string
 }
 
 type Services struct {
-    // Health  service.HealthService
-    Players *service.PlayerService
+	// Health  service.HealthService
+	Players *service.PlayerService
 }
 
 func NewRouter(d RouterDeps) *chi.Mux {
@@ -27,14 +27,18 @@ func NewRouter(d RouterDeps) *chi.Mux {
 	r.Use(LoggingMiddleware(d.Logger))
 	r.Use(RecoveryMiddleware(d.Logger))
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Content-Type"},
-		ExposedHeaders:   []string{"Link"},
-		MaxAge:           300,
+		AllowedOrigins: []string{"*"},
+		AllowedMethods: []string{"GET", "OPTIONS"},
+		AllowedHeaders: []string{"Accept", "Content-Type"},
+		ExposedHeaders: []string{"Link"},
+		MaxAge:         300,
 	}))
 	// r.Use(middleware.RealIP)
 	r.Use(middleware.RequestID)
+
+	// Not found and method not allowed handlers
+	r.NotFound(NotFoundHandler(d.Logger))
+	r.MethodNotAllowed(MethodNotAllowedHandler(d.Logger))
 
 	// Handlers
 	// docsHandler := NewDocsHandler(openapiPath)

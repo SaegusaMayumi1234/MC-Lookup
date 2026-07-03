@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -64,7 +65,7 @@ func (h *PlayerHandler) writeJSON(w http.ResponseWriter, status int, data any) {
 }
 
 func (h *PlayerHandler) writeError(w http.ResponseWriter, err error) {
- 	errResp := ErrorResponse{
+	errResp := ErrorResponse{
 		BaseResponse: BaseResponse{
 			Success: false,
 		},
@@ -84,7 +85,7 @@ func (h *PlayerHandler) writeError(w http.ResponseWriter, err error) {
 			}
 
 			errResp.Error.Details = &ErrorDetail{
-				Resolver:   resErr.Details,
+				Resolver: resErr.Details,
 			}
 		}
 
@@ -99,4 +100,48 @@ func (h *PlayerHandler) writeError(w http.ResponseWriter, err error) {
 	}
 
 	h.writeJSON(w, http.StatusInternalServerError, errResp)
+}
+
+func NotFoundHandler(logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		logger.Warn("endpoint not found",
+			"method", r.Method,
+			"path", r.URL.Path,
+		)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+
+		json.NewEncoder(w).Encode(ErrorResponse{
+			BaseResponse: BaseResponse{
+				Success: false,
+			},
+			Error: ErrorResult{
+				Code:    constant.CodeEndpointNotFound,
+				Message: "Endpoint Not Found",
+			},
+		})
+	}
+}
+
+func MethodNotAllowedHandler(logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		logger.Warn("method not allowed",
+			"method", r.Method,
+			"path", r.URL.Path,
+		)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+
+		json.NewEncoder(w).Encode(ErrorResponse{
+			BaseResponse: BaseResponse{
+				Success: false,
+			},
+			Error: ErrorResult{
+				Code:    constant.CodeMethodNotAllowed,
+				Message: http.StatusText(http.StatusMethodNotAllowed),
+			},
+		})
+	}
 }

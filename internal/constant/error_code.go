@@ -2,6 +2,8 @@ package constant
 
 const (
 	CodeNotFound             = "NOT_FOUND"
+	CodeEndpointNotFound     = "ENDPOINT_NOT_FOUND"
+	CodeMethodNotAllowed     = "METHOD_NOT_ALLOWED"
 	CodeRateLimited          = "RATE_LIMITED"
 	CodeUpstreamError        = "UPSTREAM_ERROR"
 	CodeTimeout              = "TIMEOUT"
