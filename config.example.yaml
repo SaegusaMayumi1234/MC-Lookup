@@ -16,12 +16,7 @@ resolver:
   timeout: 5
   user_agent: "mc-lookup/1.0"
   strategy: "fallback" # race | fallback (default: fallback when omitted)
-  fallback_resolver_order: # used when strategy=fallback
-    - mojang
-    - playerdb
-    - ashcon
-    - mowojang
-  race_resolver: # used when strategy=race (acts as resolver toggle list)
+  list: # (race: acts as resolver toggle list, fallback: acts as resolver order list)
     - mojang
     - playerdb
     - ashcon

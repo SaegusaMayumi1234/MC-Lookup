@@ -41,9 +41,8 @@ func main() {
 	}
 	logger.Info("redis connected")
 
-	_, activeResolverNames := cfg.Resolver.GetSelectedResolverNames()
-	resolvers := make([]resolver.Resolver, 0, len(activeResolverNames))
-	for _, name := range activeResolverNames {
+	resolvers := make([]resolver.Resolver, 0, len(cfg.Resolver.List))
+	for _, name := range cfg.Resolver.List {
 		res := resolver.GetResolverByName(name, cfg.Resolver.GetResolverTimeout(), cfg.Resolver.UserAgent)
 		if res == nil {
 			logger.Error("Resolver listed in config is not registered", "resolver", name)
@@ -51,7 +50,7 @@ func main() {
 		}
 		resolvers = append(resolvers, res)
 	}
-	logger.Info("Resolvers initialized", "strategy", cfg.Resolver.Strategy, "count", len(resolvers), "names", activeResolverNames)
+	logger.Info("Resolvers initialized", "strategy", cfg.Resolver.Strategy, "count", len(resolvers), "names", cfg.Resolver.List)
 
 	playerService := service.NewPlayerService(resolvers, cfg.Resolver.Strategy, cache, cfg.Cache.GetCacheTTL(), cfg.Cache.Prefix)
 
@@ -60,7 +59,7 @@ func main() {
 			Players: playerService,
 		},
 		Logger: logger,
-		Env: cfg.App.Env,
+		Env:    cfg.App.Env,
 	})
 
 	server := &http.Server{
@@ -85,7 +84,7 @@ func main() {
 	log.Println("Shutting down server...")
 
 	// Graceful shutdown with 30 second timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30 * time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if err := server.Shutdown(ctx); err != nil {
