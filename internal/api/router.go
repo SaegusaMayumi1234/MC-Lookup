@@ -46,7 +46,7 @@ func NewRouter(d RouterDeps) *chi.Mux {
 
 	// API v1 routes
 	r.Route("/api/v1", func(r chi.Router) {
-		r.Route("/player/minecraft", func(r chi.Router) {
+		r.Route("/player", func(r chi.Router) {
 			r.Get("/{identifier}", playerHandler.GetPlayer)
 		})
 	})
