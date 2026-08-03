@@ -11,9 +11,10 @@ import (
 )
 
 type RedisConfig struct {
-	Addr     string
-	Password string
-	DB       int
+	Addr       string
+	Password   string
+	DB         int
+	MaxRetries int
 }
 
 type RedisClient struct {
@@ -30,9 +31,10 @@ type redisEntry struct {
 // New creates a new Redis client and verifies the connection.
 func NewRedisClient(ctx context.Context, cfg RedisConfig) (*RedisClient, error) {
 	client := redis.NewClient(&redis.Options{
-		Addr:     cfg.Addr,
-		Password: cfg.Password,
-		DB:       cfg.DB,
+		Addr:       cfg.Addr,
+		Password:   cfg.Password,
+		DB:         cfg.DB,
+		MaxRetries: cfg.MaxRetries,
 	})
 
 	if err := client.Ping(ctx).Err(); err != nil {

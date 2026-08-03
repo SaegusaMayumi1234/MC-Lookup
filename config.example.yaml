@@ -11,6 +11,7 @@ redis:
   addr: localhost:6379
   password: ""
   db: 0
+  max_retries: -1
 
 resolver:
   timeout: 5

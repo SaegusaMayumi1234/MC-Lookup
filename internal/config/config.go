@@ -30,9 +30,10 @@ type ApiConfig struct {
 }
 
 type RedisConfig struct {
-	Addr     string `mapstructure:"addr"`
-	Password string `mapstructure:"password"`
-	DB       int    `mapstructure:"db"`
+	Addr       string `mapstructure:"addr"`
+	Password   string `mapstructure:"password"`
+	DB         int    `mapstructure:"db"`
+	MaxRetries int    `mapstructure:"max_retries"`
 }
 
 type CacheConfig struct {
