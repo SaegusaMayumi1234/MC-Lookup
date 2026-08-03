@@ -195,6 +195,8 @@ func (s *PlayerService) newSuccessfulResolveResult(player *model.Player, resolve
 		Player:   player,
 		Resolver: resolverName,
 		CacheHit: false,
+		CacheAge: 0,
+		CacheTTL: s.cacheTTL,
 	}
 }
 
