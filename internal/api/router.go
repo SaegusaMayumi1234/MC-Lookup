@@ -30,7 +30,7 @@ func NewRouter(d RouterDeps) *chi.Mux {
 		AllowedOrigins: []string{"*"},
 		AllowedMethods: []string{"GET", "OPTIONS"},
 		AllowedHeaders: []string{"Accept", "Content-Type"},
-		ExposedHeaders: []string{"Link"},
+		ExposedHeaders: []string{"X-Cache-Status", "X-Resolver", "X-Coalesced"},
 		MaxAge:         300,
 	}))
 	// r.Use(middleware.RealIP)
@@ -50,9 +50,7 @@ func NewRouter(d RouterDeps) *chi.Mux {
 
 	// API v1 routes
 	r.Route("/api/v1", func(r chi.Router) {
-		r.Route("/player", func(r chi.Router) {
-			r.Get("/{identifier}", playerHandler.GetPlayer)
-		})
+		r.Get("/player/{identifier}", playerHandler.GetPlayer)
 	})
 
 	return r

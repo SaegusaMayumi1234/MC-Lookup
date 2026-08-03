@@ -18,13 +18,13 @@ import (
 )
 
 type ResolveResult struct {
-	Player      *model.Player
-	Resolver    string
-	CacheHit    bool
-	CacheTTL    time.Duration
-	CacheAge    time.Duration
-	Coalesced   bool
-	Error       error
+	Player    *model.Player
+	Resolver  string
+	CacheHit  bool
+	CacheTTL  time.Duration
+	CacheAge  time.Duration
+	Coalesced bool
+	Error     error
 }
 
 type PlayerService struct {
@@ -81,7 +81,7 @@ func (s *PlayerService) Resolve(ctx context.Context, identifier string) *Resolve
 	}
 
 	res := result.(*ResolveResult)
-	
+
 	if shared && !res.CacheHit {
 		res.Coalesced = true
 	}
@@ -130,7 +130,7 @@ func (s *PlayerService) doResolveRace(ctx context.Context, identifier string) *R
 			defer wg.Done()
 
 			p, err := res.Resolve(resolveCtx, identifier)
-			
+
 			var resErr *resolver.ResolverError
 			if err != nil {
 				if re, ok := err.(*resolver.ResolverError); ok {
@@ -141,8 +141,8 @@ func (s *PlayerService) doResolveRace(ctx context.Context, identifier string) *R
 			}
 
 			select {
-				case resultCh <- result{player: p, resolver: res.Name(), err: resErr}:
-				case <-resolveCtx.Done():
+			case resultCh <- result{player: p, resolver: res.Name(), err: resErr}:
+			case <-resolveCtx.Done():
 			}
 		}(r)
 	}
@@ -155,7 +155,7 @@ func (s *PlayerService) doResolveRace(ctx context.Context, identifier string) *R
 
 	// Collect results
 	var errors []*resolver.ResolverError
-	
+
 	for res := range resultCh {
 		if res.err == nil && res.player != nil {
 			cancel()
@@ -216,7 +216,7 @@ func aggregateResolveErrors(errors []*resolver.ResolverError) *ResolveResult {
 	}
 
 	aggErr := resolver.AggregateErrors(errors)
-	
+
 	return &ResolveResult{
 		Error: &resolver.ResolverError{
 			Code:       aggErr.FinalCode,
@@ -271,7 +271,3 @@ func (s *PlayerService) cachePlayer(player *model.Player, resolverName string) {
 
 	s.cache.SetPlayerCache(s.cachePrefix, cacheData, resolverName, s.cacheTTL)
 }
-
-// func (s *PlayerService) GetCacheStats() cache.Stats {
-// 	return s.cache.GetPlayerCache()
-// }
