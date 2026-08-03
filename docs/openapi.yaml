@@ -1,0 +1,272 @@
+openapi: 3.2.0
+info:
+  title: Minecraft Player Lookup API
+  description: |
+    A high-performance API for looking up Minecraft players by username or UUID.
+
+    ## Features
+    - **Fast**: Queries multiple external APIs concurrently (race) or sequentially (fallback)
+    - **Cached**: Results are cached to reduce latency and external API calls
+    - **Reliable**: Aggregates errors across all resolvers before giving up
+    - **Coalescing**: Concurrent requests for the same identifier are deduplicated via singleflight
+
+    ## Resolvers
+    The API uses these external services:
+    - **Mojang** - Official Minecraft API
+    - **PlayerDB** - Community caching service
+    - **Ashcon** - Community API mirror
+    - **Mowojang** - High-performance Mojang mirror (no rate limits)
+
+    ## Response Headers
+    - `Cache-Control`: Standard HTTP cache directive, e.g. `public, max-age=300`
+    - `X-Cache-Status`: `HIT` or `MISS` — whether the result was served from cache
+    - `X-Resolver`: The resolver that sourced the data (present on both HIT and MISS)
+    - `X-Coalesced`: `true` if this request was deduplicated with a concurrent in-flight request for the same identifier
+
+  version: 1.0.0
+  contact:
+    name: API Support
+  license:
+    name: MIT
+    identifier: MIT
+
+servers:
+  - url: /api/v1
+    description: API v1
+
+paths:
+  /player/{identifier}:
+    get:
+      summary: Look up a Minecraft player by username or UUID
+      description: |
+        Resolves a Minecraft player by username or UUID and returns both values.
+
+        - Provide a **username** (3–16 alphanumeric/underscore characters) to get the UUID
+        - Provide a **UUID** (with or without dashes) to get the current username
+
+        Results are cached. Concurrent requests for the same identifier are automatically coalesced.
+      operationId: getPlayer
+      tags:
+        - Player
+      parameters:
+        - name: identifier
+          in: path
+          required: true
+          description: Minecraft username (3–16 chars, `[a-zA-Z0-9_]`) or UUID (with or without dashes)
+          schema:
+            type: string
+          examples:
+            username:
+              value: Notch
+              summary: Lookup by username
+            uuid_dashed:
+              value: 069a79f4-44e9-4726-a5be-fca90e38aaf5
+              summary: Lookup by UUID (dashed)
+            uuid_plain:
+              value: 069a79f444e94726a5befca90e38aaf5
+              summary: Lookup by UUID (without dashes)
+      responses:
+        '200':
+          description: Player found successfully
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              description: Standard HTTP cache directive, e.g. `public, max-age=300`
+            X-Cache-Status:
+              schema:
+                type: string
+                enum: [HIT, MISS]
+              description: Whether the result was served from cache
+            X-Resolver:
+              schema:
+                type: string
+              description: The resolver that sourced the data (present on both HIT and MISS)
+            X-Coalesced:
+              schema:
+                type: string
+                enum: ["true"]
+              description: Present and set to "true" if this request was coalesced with another concurrent in-flight request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlayerResponse'
+              example:
+                success: true
+                data:
+                  uuid: "069a79f4-44e9-4726-a5be-fca90e38aaf5"
+                  username: "Notch"
+        '400':
+          description: Invalid input — not a valid Minecraft username or UUID
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                success: false
+                error:
+                  code: "INVALID_INPUT"
+                  message: "Invalid identifier 'a': must be a valid Minecraft username (3-16 chars) or UUID"
+        '404':
+          description: Player not found — all resolvers confirmed the player does not exist
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                success: false
+                error:
+                  code: "NOT_FOUND"
+                  message: "Player does not exist"
+                  details:
+                    resolver:
+                      mojang: "Player 'NonExistent' not found"
+                      playerdb: "Player 'NonExistent' not found"
+                      ashcon: "Player 'NonExistent' not found"
+                      mowojang: "Player 'NonExistent' not found"
+        '429':
+          description: Rate limited — at least one resolver hit a rate limit
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                success: false
+                error:
+                  code: "RATE_LIMITED"
+                  message: "All resolvers are rate limited"
+        '500':
+          description: Internal server error — misconfiguration or unexpected failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                internal_error:
+                  summary: Unexpected internal error
+                  value:
+                    success: false
+                    error:
+                      code: "INTERNAL_SERVER_ERROR"
+                      message: "An unexpected error occurred"
+                no_resolvers:
+                  summary: No resolvers configured
+                  value:
+                    success: false
+                    error:
+                      code: "NO_RESOLVERS_AVAILABLE"
+                      message: "No resolvers available"
+        '502':
+          description: Upstream error — external APIs returned unexpected or error responses
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                success: false
+                error:
+                  code: "UPSTREAM_ERROR"
+                  message: "All upstream resolvers failed"
+                  details:
+                    resolver:
+                      mojang: "Upstream API returned status 503"
+                      playerdb: "Upstream API returned status 503"
+        '504':
+          description: Timeout — all resolvers exceeded the deadline
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                success: false
+                error:
+                  code: "TIMEOUT"
+                  message: "All resolvers timed out"
+
+components:
+  schemas:
+    PlayerResponse:
+      type: object
+      required:
+        - success
+        - data
+      properties:
+        success:
+          type: boolean
+          description: Always true for successful responses
+          example: true
+        data:
+          $ref: '#/components/schemas/PlayerData'
+
+    PlayerData:
+      type: object
+      required:
+        - uuid
+        - username
+      properties:
+        uuid:
+          type: string
+          pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          description: The player's UUID in dashed lowercase format
+          example: "069a79f4-44e9-4726-a5be-fca90e38aaf5"
+        username:
+          type: string
+          minLength: 3
+          maxLength: 16
+          description: The player's current username
+          example: "Notch"
+
+    ErrorResponse:
+      type: object
+      required:
+        - success
+        - error
+      properties:
+        success:
+          type: boolean
+          description: Always false for error responses
+          example: false
+        error:
+          $ref: '#/components/schemas/ErrorResult'
+
+    ErrorResult:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          enum:
+            - INVALID_INPUT
+            - NOT_FOUND
+            - RATE_LIMITED
+            - UPSTREAM_ERROR
+            - TIMEOUT
+            - NO_RESOLVERS_AVAILABLE
+            - INTERNAL_SERVER_ERROR
+          description: Machine-readable error code
+        message:
+          type: string
+          description: Human-readable error message
+        details:
+          $ref: '#/components/schemas/ErrorDetail'
+
+    ErrorDetail:
+      type: object
+      description: Additional context about resolver-level failures
+      properties:
+        resolver:
+          type: object
+          description: Per-resolver error messages, keyed by resolver name
+          additionalProperties:
+            type: string
+          example:
+            mojang: "Player 'NonExistent' not found"
+            playerdb: "Player 'NonExistent' not found"
+            ashcon: "Player 'NonExistent' not found"
+            mowojang: "Player 'NonExistent' not found"
+
+tags:
+  - name: Player
+    description: Player lookup operations

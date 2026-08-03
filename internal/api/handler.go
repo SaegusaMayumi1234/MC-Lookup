@@ -12,6 +12,7 @@ import (
 	"github.com/saegusamayumi1234/mc-lookup/internal/service"
 )
 
+// PlayerHandler handles HTTP requests related to player resolution.
 type PlayerHandler struct {
 	service *service.PlayerService
 }
@@ -122,6 +123,29 @@ func NotFoundHandler(logger *slog.Logger) http.HandlerFunc {
 			},
 		})
 	}
+}
+
+// DocsHandler serves the embedded Swagger UI and OpenAPI spec.
+type DocsHandler struct {
+	swaggerHTML []byte
+	openapiYAML []byte
+}
+
+func NewDocsHandler(swaggerHTML, openapiYAML []byte) *DocsHandler {
+	return &DocsHandler{
+		swaggerHTML: swaggerHTML,
+		openapiYAML: openapiYAML,
+	}
+}
+
+func (h *DocsHandler) ServeSwaggerUI(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(h.swaggerHTML)
+}
+
+func (h *DocsHandler) ServeOpenAPI(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/x-yaml")
+	w.Write(h.openapiYAML)
 }
 
 func MethodNotAllowedHandler(logger *slog.Logger) http.HandlerFunc {

@@ -6,6 +6,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/saegusamayumi1234/mc-lookup/docs"
 	"github.com/saegusamayumi1234/mc-lookup/internal/service"
 )
 
@@ -16,14 +17,12 @@ type RouterDeps struct {
 }
 
 type Services struct {
-	// Health  service.HealthService
 	Players *service.PlayerService
 }
 
 func NewRouter(d RouterDeps) *chi.Mux {
 	r := chi.NewRouter()
 
-	// Global middleware
 	r.Use(LoggingMiddleware(d.Logger))
 	r.Use(RecoveryMiddleware(d.Logger))
 	r.Use(cors.Handler(cors.Options{
@@ -33,22 +32,19 @@ func NewRouter(d RouterDeps) *chi.Mux {
 		ExposedHeaders: []string{"X-Cache-Status", "X-Resolver", "X-Coalesced"},
 		MaxAge:         300,
 	}))
-	// r.Use(middleware.RealIP)
 	r.Use(middleware.RequestID)
 
-	// Not found and method not allowed handlers
 	r.NotFound(NotFoundHandler(d.Logger))
 	r.MethodNotAllowed(MethodNotAllowedHandler(d.Logger))
 
-	// Handlers
-	// docsHandler := NewDocsHandler(openapiPath)
 	playerHandler := NewPlayerHandler(d.Services.Players)
 
-	// // Documentation routes
-	// r.Get("/", docsHandler.ServeSwaggerUI)
-	// r.Get("/api/openapi.yaml", docsHandler.ServeOpenAPI)
+	if d.Env == "dev" {
+		docsHandler := NewDocsHandler(docs.SwaggerHTML, docs.OpenAPIYAML)
+		r.Get("/", docsHandler.ServeSwaggerUI)
+		r.Get("/api/openapi.yaml", docsHandler.ServeOpenAPI)
+	}
 
-	// API v1 routes
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/player/{identifier}", playerHandler.GetPlayer)
 	})
