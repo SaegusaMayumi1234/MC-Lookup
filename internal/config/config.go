@@ -2,7 +2,9 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -60,8 +62,49 @@ func (c *ResolverConfig) GetResolverTimeout() time.Duration {
 }
 
 func (cfg *Config) Validate() error {
+	cfg.Resolver.Strategy = strings.ToLower(strings.TrimSpace(cfg.Resolver.Strategy))
+	if cfg.Resolver.Strategy == "" {
+		cfg.Resolver.Strategy = constant.StrategyFallback
+	}
+	cfg.Redis.Addr = strings.TrimSpace(cfg.Redis.Addr)
+	cfg.Cache.Prefix = strings.TrimSpace(cfg.Cache.Prefix)
+	cfg.Resolver.UserAgent = strings.TrimSpace(cfg.Resolver.UserAgent)
+
 	if !slices.Contains(constant.KnownStrategies(), cfg.Resolver.Strategy) {
 		return fmt.Errorf("invalid resolver strategy '%s': must be one of %v", cfg.Resolver.Strategy, constant.KnownStrategies())
+	}
+	if cfg.Api.Port < 1 || cfg.Api.Port > 65535 {
+		return fmt.Errorf("api.port must be between 1 and 65535")
+	}
+	if err := validatePositiveSeconds("api.read_timeout", cfg.Api.ReadTimeout); err != nil {
+		return err
+	}
+	if err := validatePositiveSeconds("api.write_timeout", cfg.Api.WriteTimeout); err != nil {
+		return err
+	}
+	if err := validatePositiveSeconds("resolver.timeout", cfg.Resolver.Timeout); err != nil {
+		return err
+	}
+	if strings.TrimSpace(cfg.Resolver.UserAgent) == "" {
+		return fmt.Errorf("resolver.user_agent cannot be empty")
+	}
+	if err := validatePositiveSeconds("cache.ttl", cfg.Cache.TTL); err != nil {
+		return err
+	}
+	if cfg.Cache.Prefix == "" {
+		return fmt.Errorf("cache.prefix cannot be empty")
+	}
+	if strings.TrimSpace(cfg.Redis.Addr) == "" {
+		return fmt.Errorf("redis.addr cannot be empty")
+	}
+	if err := validateRedisAddress(cfg.Redis.Addr); err != nil {
+		return err
+	}
+	if cfg.Redis.DB < 0 {
+		return fmt.Errorf("redis.db cannot be negative")
+	}
+	if cfg.Redis.MaxRetries < -1 {
+		return fmt.Errorf("redis.max_retries must be -1 or greater")
 	}
 
 	if len(cfg.Resolver.List) == 0 {
@@ -85,12 +128,36 @@ func (cfg *Config) Validate() error {
 	return nil
 }
 
+func validatePositiveSeconds(name string, seconds int) error {
+	if seconds <= 0 {
+		return fmt.Errorf("%s must be greater than zero", name)
+	}
+	const maxDurationSeconds = int64((1<<63 - 1) / int64(time.Second))
+	if int64(seconds) > maxDurationSeconds {
+		return fmt.Errorf("%s is too large", name)
+	}
+	return nil
+}
+
+func validateRedisAddress(addr string) error {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil || host == "" {
+		return fmt.Errorf("redis.addr must be a host:port address")
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return fmt.Errorf("redis.addr port must be between 1 and 65535")
+	}
+	return nil
+}
+
 func Load() (*Config, error) {
 	v := viper.New()
 
 	v.SetConfigName("config")
 	v.SetConfigType("yaml")
 	v.AddConfigPath(".")
+	v.SetDefault("resolver.strategy", constant.StrategyFallback)
 	v.SetDefault("resolver.not_found_min_count", 3)
 
 	v.AutomaticEnv()

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/saegusamayumi1234/mc-lookup/internal/constant"
@@ -36,7 +37,11 @@ func (h *PlayerHandler) GetPlayer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cacheControl := fmt.Sprintf("public, max-age=%d", int64(result.CacheTTL.Seconds()))
+	maxAge := int64(result.CacheTTL / time.Second)
+	if maxAge < 0 {
+		maxAge = 0
+	}
+	cacheControl := fmt.Sprintf("public, max-age=%d", maxAge)
 	cacheStatus := "MISS"
 	if result.CacheHit {
 		cacheStatus = "HIT"

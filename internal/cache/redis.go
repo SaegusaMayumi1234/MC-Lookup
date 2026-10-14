@@ -45,6 +45,10 @@ func NewRedisClient(ctx context.Context, cfg RedisConfig) (*RedisClient, error) 
 }
 
 func (rc *RedisClient) SetPlayerCache(prefix string, p *PlayerData, resolver string, ttl time.Duration) {
+	if ttl <= 0 {
+		return
+	}
+
 	ctx := context.Background()
 	usernameKey := prefix + model.NormalizeIdentifier(p.Username)
 	uuidKey := prefix + model.NormalizeIdentifier(p.UUID)
@@ -84,12 +88,21 @@ func (rc *RedisClient) GetPlayerCache(prefix string, identifier string) (*Entry,
 		return nil, false
 	}
 
+	ttl := ttlCmd.Val()
+	if ttl < 0 {
+		// Redis reports -1 for keys with no expiry and -2 for missing keys.
+		// Never serve legacy entries that were accidentally stored persistently.
+		if ttl == -1 {
+			_ = rc.client.Del(ctx, key).Err()
+		}
+		return nil, false
+	}
+
 	var re redisEntry
 	if err := json.Unmarshal(data, &re); err != nil {
 		return nil, false
 	}
 
-	ttl := ttlCmd.Val()
 	entry := &Entry{
 		Player:    re.Player,
 		CachedAt:  time.Unix(re.CachedAt, 0),
