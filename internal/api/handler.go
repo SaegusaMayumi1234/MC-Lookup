@@ -27,6 +27,9 @@ func (h *PlayerHandler) GetPlayer(w http.ResponseWriter, r *http.Request) {
 	identifier := chi.URLParam(r, "identifier")
 
 	result := h.service.Resolve(r.Context(), identifier)
+	if r.Context().Err() != nil {
+		return
+	}
 
 	if result.Error != nil {
 		h.writeError(w, result.Error)

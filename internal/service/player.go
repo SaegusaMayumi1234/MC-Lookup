@@ -62,31 +62,37 @@ func (s *PlayerService) Resolve(ctx context.Context, identifier string) *Resolve
 		return result
 	}
 
-	result, err, shared := s.sfGroup.Do(normalizedKey, func() (any, error) {
+	resultCh := s.sfGroup.DoChan(normalizedKey, func() (any, error) {
+		resolveCtx := context.WithoutCancel(ctx)
 		if cached := s.getCachedResult(normalizedKey); cached != nil {
 			return cached, nil
 		}
 
-		return s.doResolve(ctx, identifier), nil
+		return s.doResolve(resolveCtx, identifier), nil
 	})
 
-	if err != nil {
-		return &ResolveResult{
-			Error: &resolver.ResolverError{
-				Code:       constant.CodeInternalServerError,
-				Message:    err.Error(),
-				StatusCode: http.StatusInternalServerError,
-			},
+	select {
+	case <-ctx.Done():
+		return &ResolveResult{Error: ctx.Err()}
+	case result := <-resultCh:
+		if result.Err != nil {
+			return &ResolveResult{
+				Error: &resolver.ResolverError{
+					Code:       constant.CodeInternalServerError,
+					Message:    result.Err.Error(),
+					StatusCode: http.StatusInternalServerError,
+				},
+			}
 		}
+
+		res := result.Val.(*ResolveResult)
+
+		callerResult := *res
+		if result.Shared && !callerResult.CacheHit {
+			callerResult.Coalesced = true
+		}
+		return &callerResult
 	}
-
-	res := result.(*ResolveResult)
-
-	if shared && !res.CacheHit {
-		res.Coalesced = true
-	}
-
-	return res
 }
 
 // doResolve dispatches player resolution to the configured strategy.
