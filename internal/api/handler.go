@@ -1,7 +1,7 @@
 package api
 
 import (
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -62,7 +62,7 @@ func (h *PlayerHandler) GetPlayer(w http.ResponseWriter, r *http.Request) {
 func (h *PlayerHandler) writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	json.MarshalWrite(w, data)
 }
 
 func (h *PlayerHandler) writeError(w http.ResponseWriter, err error) {
@@ -103,28 +103,6 @@ func (h *PlayerHandler) writeError(w http.ResponseWriter, err error) {
 	h.writeJSON(w, http.StatusInternalServerError, errResp)
 }
 
-func NotFoundHandler(logger *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		logger.Warn("endpoint not found",
-			"method", r.Method,
-			"path", r.URL.Path,
-		)
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-
-		json.NewEncoder(w).Encode(ErrorResponse{
-			BaseResponse: BaseResponse{
-				Success: false,
-			},
-			Error: ErrorResult{
-				Code:    constant.CodeEndpointNotFound,
-				Message: "Endpoint Not Found",
-			},
-		})
-	}
-}
-
 // DocsHandler serves the embedded Swagger UI and OpenAPI spec.
 type DocsHandler struct {
 	swaggerHTML []byte
@@ -148,6 +126,28 @@ func (h *DocsHandler) ServeOpenAPI(w http.ResponseWriter, r *http.Request) {
 	w.Write(h.openapiYAML)
 }
 
+func NotFoundHandler(logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		logger.Warn("endpoint not found",
+			"method", r.Method,
+			"path", r.URL.Path,
+		)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+
+		json.MarshalWrite(w, ErrorResponse{
+			BaseResponse: BaseResponse{
+				Success: false,
+			},
+			Error: ErrorResult{
+				Code:    constant.CodeEndpointNotFound,
+				Message: "Endpoint Not Found",
+			},
+		})
+	}
+}
+
 func MethodNotAllowedHandler(logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		logger.Warn("method not allowed",
@@ -158,7 +158,7 @@ func MethodNotAllowedHandler(logger *slog.Logger) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusMethodNotAllowed)
 
-		json.NewEncoder(w).Encode(ErrorResponse{
+		json.MarshalWrite(w, ErrorResponse{
 			BaseResponse: BaseResponse{
 				Success: false,
 			},

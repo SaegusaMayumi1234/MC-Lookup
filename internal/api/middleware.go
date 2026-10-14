@@ -1,7 +1,7 @@
 package api
 
 import (
-	"encoding/json"
+	"encoding/json/v2"
 	"log/slog"
 	"net/http"
 	"time"
@@ -38,10 +38,9 @@ func RecoveryMiddleware(logger *slog.Logger) func(next http.Handler) http.Handle
 				if err := recover(); err != nil {
 					logger.Error("PANIC", "error", err)
 
-					w.WriteHeader(http.StatusInternalServerError)
-
 					w.Header().Set("Content-Type", "application/json")
-					json.NewEncoder(w).Encode(ErrorResponse{
+					w.WriteHeader(http.StatusInternalServerError)
+					json.MarshalWrite(w, ErrorResponse{
 						BaseResponse: BaseResponse{
 							Success: false,
 						},
