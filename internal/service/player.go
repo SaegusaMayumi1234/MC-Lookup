@@ -28,23 +28,25 @@ type ResolveResult struct {
 }
 
 type PlayerService struct {
-	resolvers   []resolver.Resolver
-	strategy    string
-	cache       cache.Cache
-	cacheTTL    time.Duration
-	cachePrefix string
-	sfGroup     singleflight.Group
+	resolvers        []resolver.Resolver
+	strategy         string
+	cache            cache.Cache
+	cacheTTL         time.Duration
+	cachePrefix      string
+	notFoundMinCount int
+	sfGroup          singleflight.Group
 }
 
-func NewPlayerService(resolvers []resolver.Resolver, strategy string, c cache.Cache, cacheTTL time.Duration, cachePrefix string) *PlayerService {
+func NewPlayerService(resolvers []resolver.Resolver, strategy string, c cache.Cache, cacheTTL time.Duration, cachePrefix string, notFoundMinCount int) *PlayerService {
 	strategy = strings.ToLower(strings.TrimSpace(strategy))
 
 	return &PlayerService{
-		resolvers:   resolvers,
-		strategy:    strategy,
-		cache:       c,
-		cacheTTL:    cacheTTL,
-		cachePrefix: cachePrefix,
+		resolvers:        resolvers,
+		strategy:         strategy,
+		cache:            c,
+		cacheTTL:         cacheTTL,
+		cachePrefix:      cachePrefix,
+		notFoundMinCount: notFoundMinCount,
 	}
 }
 
@@ -174,7 +176,7 @@ func (s *PlayerService) doResolveRace(ctx context.Context, identifier string) *R
 		}
 	}
 
-	return aggregateResolveErrors(errors)
+	return aggregateResolveErrors(errors, s.notFoundMinCount)
 }
 
 func (s *PlayerService) doResolveFallback(ctx context.Context, identifier string) *ResolveResult {
@@ -190,7 +192,7 @@ func (s *PlayerService) doResolveFallback(ctx context.Context, identifier string
 		errors = append(errors, wrapResolverError(res.Name(), err))
 	}
 
-	return aggregateResolveErrors(errors)
+	return aggregateResolveErrors(errors, s.notFoundMinCount)
 }
 
 func (s *PlayerService) newSuccessfulResolveResult(player *model.Player, resolverName string) *ResolveResult {
@@ -218,12 +220,12 @@ func wrapResolverError(resolverName string, err error) *resolver.ResolverError {
 	return resolver.NewUpstreamError(resolverName, 0, err)
 }
 
-func aggregateResolveErrors(errors []*resolver.ResolverError) *ResolveResult {
+func aggregateResolveErrors(errors []*resolver.ResolverError, notFoundMinCount int) *ResolveResult {
 	if len(errors) == 0 {
 		return noResolversResult()
 	}
 
-	aggErr := resolver.AggregateErrors(errors)
+	aggErr := resolver.AggregateErrors(errors, notFoundMinCount)
 
 	return &ResolveResult{
 		Error: &resolver.ResolverError{

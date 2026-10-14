@@ -22,6 +22,7 @@ resolver:
     - playerdb
     - ashcon
     - mowojang
+  not_found_min_count: 3 # minimum resolver NOT_FOUND results required to return 404
 
 cache:
   ttl: 3600

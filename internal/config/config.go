@@ -42,10 +42,11 @@ type CacheConfig struct {
 }
 
 type ResolverConfig struct {
-	Timeout   int      `mapstructure:"timeout"`
-	UserAgent string   `mapstructure:"user_agent"`
-	Strategy  string   `mapstructure:"strategy"`
-	List      []string `mapstructure:"list"`
+	Timeout          int      `mapstructure:"timeout"`
+	UserAgent        string   `mapstructure:"user_agent"`
+	Strategy         string   `mapstructure:"strategy"`
+	List             []string `mapstructure:"list"`
+	NotFoundMinCount int      `mapstructure:"not_found_min_count"`
 }
 
 // GetCacheTTL returns cache TTL as time.Duration
@@ -65,6 +66,9 @@ func (cfg *Config) Validate() error {
 
 	if len(cfg.Resolver.List) == 0 {
 		return fmt.Errorf("resolver list cannot be empty")
+	}
+	if cfg.Resolver.NotFoundMinCount < 1 || cfg.Resolver.NotFoundMinCount > len(cfg.Resolver.List) {
+		return fmt.Errorf("resolver not_found_min_count must be between 1 and the number of configured resolvers (%d)", len(cfg.Resolver.List))
 	}
 
 	seen := make(map[string]struct{}, len(cfg.Resolver.List))
@@ -87,6 +91,7 @@ func Load() (*Config, error) {
 	v.SetConfigName("config")
 	v.SetConfigType("yaml")
 	v.AddConfigPath(".")
+	v.SetDefault("resolver.not_found_min_count", 3)
 
 	v.AutomaticEnv()
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))

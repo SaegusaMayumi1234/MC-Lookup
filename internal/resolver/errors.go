@@ -138,19 +138,19 @@ func MapHTTPStatusToError(resolver string, statusCode int, identifier string) *R
 }
 
 type AggregatedError struct {
-	Errors         []*ResolverError
-	FinalCode      string
-	FinalStatus    int
-	FinalMessage   string
+	Errors       []*ResolverError
+	FinalCode    string
+	FinalStatus  int
+	FinalMessage string
 }
 
 func (e *AggregatedError) Error() string {
 	return e.FinalMessage
 }
 
-// AggregateErrors analyzes errors from all resolvers and returns a unified error
-// Priority: NOT_FOUND (if all agree) > RATE_LIMITED > TIMEOUT > UPSTREAM_ERROR
-func AggregateErrors(errs []*ResolverError) *AggregatedError {
+// AggregateErrors analyzes errors from all resolvers and returns a unified error.
+// The NOT_FOUND quorum is checked before RATE_LIMITED, TIMEOUT, and UPSTREAM_ERROR.
+func AggregateErrors(errs []*ResolverError, notFoundMinCount int) *AggregatedError {
 	if len(errs) == 0 {
 		return &AggregatedError{
 			FinalCode:    constant.CodeNoResolversAvailable,
@@ -159,23 +159,23 @@ func AggregateErrors(errs []*ResolverError) *AggregatedError {
 		}
 	}
 
-	resolversTried := make([]string, 0, len(errs))
 	codeCounts := make(map[string]int)
 
 	for _, err := range errs {
-		resolversTried = append(resolversTried, err.Resolver)
 		codeCounts[err.Code]++
 	}
 
 	agg := &AggregatedError{
-		Errors:         errs,
+		Errors: errs,
 	}
 
-	// If ALL resolvers returned NOT_FOUND, the player doesn't exist
-	if codeCounts[constant.CodeNotFound] == len(errs) {
+	// A configured NOT_FOUND quorum takes precedence over transient resolver errors.
+	// Unanimous NOT_FOUND remains conclusive even if the threshold is higher.
+	notFoundCount := codeCounts[constant.CodeNotFound]
+	if notFoundCount == len(errs) || (notFoundMinCount > 0 && notFoundCount >= notFoundMinCount) {
 		agg.FinalCode = constant.CodeNotFound
 		agg.FinalStatus = http.StatusNotFound
-		agg.FinalMessage = "Player does not exist"
+		agg.FinalMessage = fmt.Sprintf("Player not found by %d of %d resolvers", notFoundCount, len(errs))
 		return agg
 	}
 
@@ -183,7 +183,7 @@ func AggregateErrors(errs []*ResolverError) *AggregatedError {
 	if codeCounts[constant.CodeRateLimited] > 0 {
 		agg.FinalCode = constant.CodeRateLimited
 		agg.FinalStatus = http.StatusTooManyRequests
-		agg.FinalMessage = "All resolvers are rate limited"
+		agg.FinalMessage = resolverFailureSummary("Rate limiting", codeCounts[constant.CodeRateLimited], len(errs))
 		return agg
 	}
 
@@ -191,13 +191,20 @@ func AggregateErrors(errs []*ResolverError) *AggregatedError {
 	if codeCounts[constant.CodeTimeout] > 0 {
 		agg.FinalCode = constant.CodeTimeout
 		agg.FinalStatus = http.StatusGatewayTimeout
-		agg.FinalMessage = "All resolvers timed out"
+		agg.FinalMessage = resolverFailureSummary("Timeouts", codeCounts[constant.CodeTimeout], len(errs))
 		return agg
 	}
 
 	// Default to upstream error
 	agg.FinalCode = constant.CodeUpstreamError
 	agg.FinalStatus = http.StatusBadGateway
-	agg.FinalMessage = "All upstream resolvers failed"
+	agg.FinalMessage = "All resolver attempts failed"
 	return agg
+}
+
+func resolverFailureSummary(failure string, count, total int) string {
+	if count == total {
+		return fmt.Sprintf("%s affected all %d resolvers", failure, total)
+	}
+	return fmt.Sprintf("%s affected %d of %d resolvers", failure, count, total)
 }

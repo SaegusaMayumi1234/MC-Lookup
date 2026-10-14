@@ -108,7 +108,7 @@ paths:
                   code: "INVALID_INPUT"
                   message: "Invalid identifier 'a': must be a valid Minecraft username (3-16 chars) or UUID"
         '404':
-          description: Player not found — all resolvers confirmed the player does not exist
+          description: The configured minimum NOT_FOUND count was reached; the response message reports how many resolvers confirmed it.
           content:
             application/json:
               schema:
@@ -117,15 +117,14 @@ paths:
                 success: false
                 error:
                   code: "NOT_FOUND"
-                  message: "Player does not exist"
+                  message: "Player not found by 3 of 4 resolvers"
                   details:
                     resolver:
                       mojang: "Player 'NonExistent' not found"
                       playerdb: "Player 'NonExistent' not found"
                       ashcon: "Player 'NonExistent' not found"
-                      mowojang: "Player 'NonExistent' not found"
         '429':
-          description: Rate limited — at least one resolver hit a rate limit
+          description: Rate-limit failures occurred and the configured NOT_FOUND quorum was not reached; the message reports how many resolvers were rate-limited.
           content:
             application/json:
               schema:
@@ -134,7 +133,7 @@ paths:
                 success: false
                 error:
                   code: "RATE_LIMITED"
-                  message: "All resolvers are rate limited"
+                  message: "Rate limiting affected 1 of 4 resolvers"
         '500':
           description: Internal server error — misconfiguration or unexpected failure
           content:
@@ -166,13 +165,13 @@ paths:
                 success: false
                 error:
                   code: "UPSTREAM_ERROR"
-                  message: "All upstream resolvers failed"
+                  message: "All resolver attempts failed"
                   details:
                     resolver:
                       mojang: "Upstream API returned status 503"
                       playerdb: "Upstream API returned status 503"
         '504':
-          description: Timeout — all resolvers exceeded the deadline
+          description: Resolver timeouts occurred, no rate limit took precedence, and the configured NOT_FOUND quorum was not reached.
           content:
             application/json:
               schema:
@@ -181,7 +180,7 @@ paths:
                 success: false
                 error:
                   code: "TIMEOUT"
-                  message: "All resolvers timed out"
+                  message: "Timeouts affected 1 of 4 resolvers"
 
 components:
   schemas:
