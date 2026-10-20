@@ -100,11 +100,11 @@ func run(logger *slog.Logger) error {
 	serverErr := make(chan error, 1)
 
 	go func() {
+		logger.Info("Server listening", "url", fmt.Sprintf("http://localhost:%d", cfg.Api.Port))
+		logger.Info("API docs available", "url", fmt.Sprintf("http://localhost:%d/", cfg.Api.Port))
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			serverErr <- err
 		}
-		logger.Info("Server listening", "url", fmt.Sprintf("http://localhost:%d", cfg.Api.Port))
-		logger.Info("API docs available", "url", fmt.Sprintf("http://localhost:%d/", cfg.Api.Port))
 	}()
 
 	quit := make(chan os.Signal, 1)
