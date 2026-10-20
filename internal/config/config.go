@@ -2,14 +2,14 @@ package config
 
 import (
 	"fmt"
-	"net"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/saegusamayumi1234/mc-lookup/internal/constant"
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/viper"
+
+	"github.com/saegusamayumi1234/mc-lookup/internal/constant"
 )
 
 type Config struct {
@@ -39,8 +39,11 @@ type RedisConfig struct {
 }
 
 type CacheConfig struct {
-	TTL    int    `mapstructure:"ttl"`
-	Prefix string `mapstructure:"prefix"`
+	TTL             int    `mapstructure:"ttl"`
+	Prefix          string `mapstructure:"prefix"`
+	NegativeEnabled bool   `mapstructure:"negative_enabled"`
+	NegativePrefix  string `mapstructure:"negative_prefix"`
+	NegativeTTL     int    `mapstructure:"negative_ttl"`
 }
 
 type ResolverConfig struct {
@@ -56,99 +59,25 @@ func (c *CacheConfig) GetCacheTTL() time.Duration {
 	return time.Duration(c.TTL) * time.Second
 }
 
+// IsNegativeCacheEnabled reports whether conclusive not-found verdicts should be cached.
+func (c *CacheConfig) IsNegativeCacheEnabled() bool {
+	return c.NegativeEnabled && c.NegativeTTL > 0
+}
+
+// GetNegativeTTL returns the negative-cache TTL as time.Duration
+func (c *CacheConfig) GetNegativeTTL() time.Duration {
+	return time.Duration(c.NegativeTTL) * time.Second
+}
+
+// GetNegativeCachePrefix returns the full key prefix for negative entries:
+// cache.prefix + cache.negative_prefix.
+func (c *CacheConfig) GetNegativeCachePrefix() string {
+	return c.Prefix + c.NegativePrefix
+}
+
 // GetResolverTimeout returns resolver timeout as time.Duration
 func (c *ResolverConfig) GetResolverTimeout() time.Duration {
 	return time.Duration(c.Timeout) * time.Second
-}
-
-func (cfg *Config) Validate() error {
-	cfg.Resolver.Strategy = strings.ToLower(strings.TrimSpace(cfg.Resolver.Strategy))
-	if cfg.Resolver.Strategy == "" {
-		cfg.Resolver.Strategy = constant.StrategyFallback
-	}
-	cfg.Redis.Addr = strings.TrimSpace(cfg.Redis.Addr)
-	cfg.Cache.Prefix = strings.TrimSpace(cfg.Cache.Prefix)
-	cfg.Resolver.UserAgent = strings.TrimSpace(cfg.Resolver.UserAgent)
-
-	if !slices.Contains(constant.KnownStrategies(), cfg.Resolver.Strategy) {
-		return fmt.Errorf("invalid resolver strategy '%s': must be one of %v", cfg.Resolver.Strategy, constant.KnownStrategies())
-	}
-	if cfg.Api.Port < 1 || cfg.Api.Port > 65535 {
-		return fmt.Errorf("api.port must be between 1 and 65535")
-	}
-	if err := validatePositiveSeconds("api.read_timeout", cfg.Api.ReadTimeout); err != nil {
-		return err
-	}
-	if err := validatePositiveSeconds("api.write_timeout", cfg.Api.WriteTimeout); err != nil {
-		return err
-	}
-	if err := validatePositiveSeconds("resolver.timeout", cfg.Resolver.Timeout); err != nil {
-		return err
-	}
-	if strings.TrimSpace(cfg.Resolver.UserAgent) == "" {
-		return fmt.Errorf("resolver.user_agent cannot be empty")
-	}
-	if err := validatePositiveSeconds("cache.ttl", cfg.Cache.TTL); err != nil {
-		return err
-	}
-	if cfg.Cache.Prefix == "" {
-		return fmt.Errorf("cache.prefix cannot be empty")
-	}
-	if strings.TrimSpace(cfg.Redis.Addr) == "" {
-		return fmt.Errorf("redis.addr cannot be empty")
-	}
-	if err := validateRedisAddress(cfg.Redis.Addr); err != nil {
-		return err
-	}
-	if cfg.Redis.DB < 0 {
-		return fmt.Errorf("redis.db cannot be negative")
-	}
-	if cfg.Redis.MaxRetries < -1 {
-		return fmt.Errorf("redis.max_retries must be -1 or greater")
-	}
-
-	if len(cfg.Resolver.List) == 0 {
-		return fmt.Errorf("resolver list cannot be empty")
-	}
-	if cfg.Resolver.NotFoundMinCount < 1 || cfg.Resolver.NotFoundMinCount > len(cfg.Resolver.List) {
-		return fmt.Errorf("resolver not_found_min_count must be between 1 and the number of configured resolvers (%d)", len(cfg.Resolver.List))
-	}
-
-	seen := make(map[string]struct{}, len(cfg.Resolver.List))
-	for _, item := range cfg.Resolver.List {
-		if !slices.Contains(constant.KnownResolverNames(), item) {
-			return fmt.Errorf("resolver '%s' is not a known resolver", item)
-		}
-		if _, duplicate := seen[item]; duplicate {
-			return fmt.Errorf("resolver '%s' is duplicated", item)
-		}
-		seen[item] = struct{}{}
-	}
-
-	return nil
-}
-
-func validatePositiveSeconds(name string, seconds int) error {
-	if seconds <= 0 {
-		return fmt.Errorf("%s must be greater than zero", name)
-	}
-	const maxDurationSeconds = int64((1<<63 - 1) / int64(time.Second))
-	if int64(seconds) > maxDurationSeconds {
-		return fmt.Errorf("%s is too large", name)
-	}
-	return nil
-}
-
-func validateRedisAddress(addr string) error {
-	host, port, err := net.SplitHostPort(strings.TrimSpace(addr))
-	if err != nil || host == "" {
-		return fmt.Errorf("redis.addr must be a host:port address")
-	}
-	portNumber, err := strconv.Atoi(port)
-	if err != nil || portNumber < 1 || portNumber > 65535 {
-		return fmt.Errorf("redis.addr port must be between 1 and 65535")
-	}
-	return nil
 }
 
 func Load() (*Config, error) {
@@ -159,6 +88,9 @@ func Load() (*Config, error) {
 	v.AddConfigPath(".")
 	v.SetDefault("resolver.strategy", constant.StrategyFallback)
 	v.SetDefault("resolver.not_found_min_count", 3)
+	v.SetDefault("cache.negative_enabled", true)
+	v.SetDefault("cache.negative_prefix", "nf:")
+	v.SetDefault("cache.negative_ttl", 300)
 
 	v.AutomaticEnv()
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
@@ -168,7 +100,7 @@ func Load() (*Config, error) {
 	}
 
 	var cfg Config
-	if err := v.Unmarshal(&cfg); err != nil {
+	if err := decodeSettings(v, &cfg); err != nil {
 		return nil, err
 	}
 
@@ -177,4 +109,37 @@ func Load() (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// decodeSettings decodes viper settings into cfg, mirroring viper.Unmarshal's
+// decoder configuration (weak typing for env overrides, list splitting) while
+// additionally rejecting keys that do not map to any config field. A typo'd key
+// such as `resolver.stratgy` would otherwise silently fall back to defaults.
+func decodeSettings(v *viper.Viper, cfg *Config) error {
+	var meta mapstructure.Metadata
+	dec, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		Metadata:         &meta,
+		Result:           cfg,
+		WeaklyTypedInput: true,
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			mapstructure.StringToTimeDurationHookFunc(),
+			mapstructure.StringToSliceHookFunc(","),
+		),
+		TagName: "mapstructure",
+	})
+	if err != nil {
+		return fmt.Errorf("config decoder: %w", err)
+	}
+
+	if err := dec.Decode(v.AllSettings()); err != nil {
+		return err
+	}
+
+	unused := meta.Unused
+	if len(unused) > 0 {
+		slices.Sort(unused)
+		return fmt.Errorf("unknown config keys: %s (check for typos)", strings.Join(unused, ", "))
+	}
+
+	return nil
 }

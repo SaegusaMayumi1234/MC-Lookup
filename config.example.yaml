@@ -5,7 +5,7 @@ app:
 api:
   port: 8080
   read_timeout: 5
-  write_timeout: 5
+  write_timeout: 30
 
 redis:
   addr: localhost:6379
@@ -16,14 +16,17 @@ redis:
 resolver:
   timeout: 5
   user_agent: "mc-lookup/1.0"
-  strategy: "fallback" # race | fallback (default: fallback when omitted)
-  list: # (race: acts as resolver toggle list, fallback: acts as resolver order list)
+  strategy: "fallback"
+  list:
     - mojang
     - playerdb
     - ashcon
     - mowojang
-  not_found_min_count: 3 # minimum resolver NOT_FOUND results required to return 404
+  not_found_min_count: 3
 
 cache:
   ttl: 3600
   prefix: "mc-lookup:"
+  negative_enabled: true
+  negative_ttl: 300
+  negative_prefix: "nf:"

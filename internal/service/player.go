@@ -28,25 +28,59 @@ type ResolveResult struct {
 }
 
 type PlayerService struct {
-	resolvers        []resolver.Resolver
-	strategy         string
-	cache            cache.Cache
-	cacheTTL         time.Duration
-	cachePrefix      string
-	notFoundMinCount int
-	sfGroup          singleflight.Group
+	resolvers            []resolver.Resolver
+	strategy             string
+	notFoundMinCount     int
+	cache                cache.Cache
+	cacheTTL             time.Duration
+	cachePrefix          string
+	negativeCacheEnabled bool
+	negativeCachePrefix  string
+	negativeCacheTTL     time.Duration
+	sfGroup              singleflight.Group
+	inflightResolves     sync.WaitGroup
 }
 
-func NewPlayerService(resolvers []resolver.Resolver, strategy string, c cache.Cache, cacheTTL time.Duration, cachePrefix string, notFoundMinCount int) *PlayerService {
+func NewPlayerService(
+	resolvers []resolver.Resolver,
+	strategy string,
+	notFoundMinCount int,
+	c cache.Cache,
+	cacheTTL time.Duration,
+	cachePrefix string,
+	negativeCacheEnabled bool,
+	negativeCachePrefix string,
+	negativeCacheTTL time.Duration,
+) *PlayerService {
 	strategy = strings.ToLower(strings.TrimSpace(strategy))
 
 	return &PlayerService{
-		resolvers:        resolvers,
-		strategy:         strategy,
-		cache:            c,
-		cacheTTL:         cacheTTL,
-		cachePrefix:      cachePrefix,
-		notFoundMinCount: notFoundMinCount,
+		resolvers:            resolvers,
+		strategy:             strategy,
+		notFoundMinCount:     notFoundMinCount,
+		cache:                c,
+		cacheTTL:             cacheTTL,
+		cachePrefix:          cachePrefix,
+		negativeCacheEnabled: negativeCacheEnabled,
+		negativeCachePrefix:  negativeCachePrefix,
+		negativeCacheTTL:     negativeCacheTTL,
+	}
+}
+
+// WaitInflightResolves blocks until all in-flight leader resolves have finished,
+// or until ctx is done.
+func (s *PlayerService) WaitInflightResolves(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		s.inflightResolves.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -65,13 +99,25 @@ func (s *PlayerService) Resolve(ctx context.Context, identifier string) *Resolve
 		return result
 	}
 
+	if result := s.getCachedNotFound(normalizedKey); result != nil {
+		return result
+	}
+
 	resultCh := s.sfGroup.DoChan(normalizedKey, func() (any, error) {
 		resolveCtx := context.WithoutCancel(ctx)
 		if cached := s.getCachedResult(normalizedKey); cached != nil {
 			return cached, nil
 		}
+		if cached := s.getCachedNotFound(normalizedKey); cached != nil {
+			return cached, nil
+		}
 
-		return s.doResolve(resolveCtx, identifier), nil
+		// track inflightResolves for graceful shutdown.
+		s.inflightResolves.Add(1)
+		result := s.doResolve(resolveCtx, identifier)
+		s.inflightResolves.Done()
+
+		return result, nil
 	})
 
 	select {
@@ -177,7 +223,7 @@ func (s *PlayerService) doResolveRace(ctx context.Context, identifier string) *R
 		}
 	}
 
-	return aggregateResolveErrors(errors, s.notFoundMinCount)
+	return s.aggregateResolveErrors(identifier, errors)
 }
 
 func (s *PlayerService) doResolveFallback(ctx context.Context, identifier string) *ResolveResult {
@@ -193,7 +239,7 @@ func (s *PlayerService) doResolveFallback(ctx context.Context, identifier string
 		errors = append(errors, wrapResolverError(res.Name(), err))
 	}
 
-	return aggregateResolveErrors(errors, s.notFoundMinCount)
+	return s.aggregateResolveErrors(identifier, errors)
 }
 
 func (s *PlayerService) newSuccessfulResolveResult(player *model.Player, resolverName string) *ResolveResult {
@@ -221,12 +267,16 @@ func wrapResolverError(resolverName string, err error) *resolver.ResolverError {
 	return resolver.NewUpstreamError(resolverName, 0, err)
 }
 
-func aggregateResolveErrors(errors []*resolver.ResolverError, notFoundMinCount int) *ResolveResult {
+func (s *PlayerService) aggregateResolveErrors(identifier string, errors []*resolver.ResolverError) *ResolveResult {
 	if len(errors) == 0 {
 		return noResolversResult()
 	}
 
-	aggErr := resolver.AggregateErrors(errors, notFoundMinCount)
+	aggErr := resolver.AggregateErrors(errors, s.notFoundMinCount)
+
+	if s.negativeCacheEnabled && s.negativeCacheTTL > 0 && aggErr.FinalCode == constant.CodeNotFound {
+		s.cache.SetNotFoundCache(s.negativeCachePrefix, identifier, s.negativeCacheTTL)
+	}
 
 	return &ResolveResult{
 		Error: &resolver.ResolverError{
@@ -275,6 +325,29 @@ func (s *PlayerService) getCachedResult(key string) *ResolveResult {
 		CacheHit: true,
 		CacheTTL: entry.TTL(),
 		CacheAge: entry.Age(),
+	}
+}
+
+// getCachedNotFound returns a cached not-found verdict, or nil on miss/when
+// negative caching is disabled.
+func (s *PlayerService) getCachedNotFound(key string) *ResolveResult {
+	if !s.negativeCacheEnabled {
+		return nil
+	}
+
+	ttl, found := s.cache.GetNotFoundCache(s.negativeCachePrefix, key)
+	if !found {
+		return nil
+	}
+
+	return &ResolveResult{
+		Error: &resolver.ResolverError{
+			Code:       constant.CodeNotFound,
+			Message:    "Player not found (cached)",
+			StatusCode: http.StatusNotFound,
+		},
+		CacheHit: true,
+		CacheTTL: ttl,
 	}
 }
 

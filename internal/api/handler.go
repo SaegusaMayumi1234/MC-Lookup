@@ -33,14 +33,18 @@ func (h *PlayerHandler) GetPlayer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if result.Error != nil {
+		if result.CacheHit {
+			maxAge := int64(result.CacheTTL / time.Second)
+			maxAge = max(maxAge, 0)
+			w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", maxAge))
+			w.Header().Set("X-Cache-Status", "HIT")
+		}
 		h.writeError(w, result.Error)
 		return
 	}
 
 	maxAge := int64(result.CacheTTL / time.Second)
-	if maxAge < 0 {
-		maxAge = 0
-	}
+	maxAge = max(maxAge, 0)
 	cacheControl := fmt.Sprintf("public, max-age=%d", maxAge)
 	cacheStatus := "MISS"
 	if result.CacheHit {

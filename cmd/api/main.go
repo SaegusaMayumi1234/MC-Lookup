@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -25,28 +24,47 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
+	if err := run(logger); err != nil {
+		os.Exit(1)
+	}
+}
+
+func run(logger *slog.Logger) error {
 	ctx := context.Background()
 
+	// load config
 	cfg, err := config.Load()
 	if err != nil {
 		logger.Error("Failed to load config", "error", err)
-		os.Exit(1)
+		return err
 	}
 	logger.Info("config loaded", "app_name", cfg.App.Name, "env", cfg.App.Env)
 
-	cache, err := cache.NewRedisClient(ctx, cache.RedisConfig(cfg.Redis))
+	for _, warning := range cfg.Warnings() {
+		logger.Warn("config warning", "message", warning)
+	}
+
+	// connect to redis cache
+	redisCache, err := cache.NewRedisClient(ctx, cache.RedisConfig(cfg.Redis), logger)
 	if err != nil {
 		logger.Error("Failed to connect to Redis", "error", err)
-		os.Exit(1)
+		return err
 	}
 	logger.Info("redis connected")
 
+	defer func() {
+		if err := redisCache.Close(); err != nil {
+			logger.Warn("redis close failed", "error", err)
+		}
+	}()
+
+	// register resolvers from config
 	resolvers := make([]resolver.Resolver, 0, len(cfg.Resolver.List))
 	for _, name := range cfg.Resolver.List {
 		res := resolver.GetResolverByName(name, cfg.Resolver.GetResolverTimeout(), cfg.Resolver.UserAgent)
 		if res == nil {
 			logger.Error("Resolver listed in config is not registered", "resolver", name)
-			os.Exit(1)
+			return fmt.Errorf("unregistered resolver %q", name)
 		}
 		resolvers = append(resolvers, res)
 	}
@@ -55,10 +73,13 @@ func main() {
 	playerService := service.NewPlayerService(
 		resolvers,
 		cfg.Resolver.Strategy,
-		cache,
+		cfg.Resolver.NotFoundMinCount,
+		redisCache,
 		cfg.Cache.GetCacheTTL(),
 		cfg.Cache.Prefix,
-		cfg.Resolver.NotFoundMinCount,
+		cfg.Cache.IsNegativeCacheEnabled(),
+		cfg.Cache.GetNegativeCachePrefix(),
+		cfg.Cache.GetNegativeTTL(),
 	)
 
 	router := api.NewRouter(api.RouterDeps{
@@ -76,27 +97,43 @@ func main() {
 		WriteTimeout: time.Duration(cfg.Api.WriteTimeout) * time.Second,
 	}
 
+	serverErr := make(chan error, 1)
+
 	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			serverErr <- err
+		}
 		logger.Info("Server listening", "url", fmt.Sprintf("http://localhost:%d", cfg.Api.Port))
 		logger.Info("API docs available", "url", fmt.Sprintf("http://localhost:%d/", cfg.Api.Port))
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error("Server error", "error", err)
-		}
 	}()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
 
-	log.Println("Shutting down server...")
-
-	// Graceful shutdown with 30 second timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := server.Shutdown(ctx); err != nil {
-		log.Fatalf("Server forced to shutdown: %v", err)
+	// log server error and quit on failure
+	select {
+	case err := <-serverErr:
+		logger.Error("Server error", "error", err)
+		return err
+	case <-quit:
 	}
 
-	log.Println("Server stopped")
+	logger.Info("Shutting down server...")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// wait for http server shutdown
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		logger.Error("Server forced to shutdown", "error", err)
+		return err
+	}
+
+	// wait for all inflight leader resolves to finish
+	if err := playerService.WaitInflightResolves(shutdownCtx); err != nil {
+		logger.Warn("Shutdown budget expired while resolves were in flight", "error", err)
+	}
+
+	logger.Info("Server stopped")
+	return nil
 }

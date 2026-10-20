@@ -36,11 +36,19 @@ func (e *Entry) IsExpired() bool {
 
 // Cache defines the interface for player caching
 type Cache interface {
-	// Set stores a player in cache with the given TTL
+	// SetPlayerCache stores a player in cache with the given TTL
 	SetPlayerCache(prefix string, p *PlayerData, resolver string, ttl time.Duration)
 
-	// Get retrieves a player from cache by key (normalized identifier)
+	// GetPlayerCache retrieves a player from cache by key (normalized identifier)
 	GetPlayerCache(prefix string, identifier string) (*Entry, bool)
+
+	// SetNotFoundCache stores a negative (not-found) verdict under the given
+	// (full) negative-cache key prefix
+	SetNotFoundCache(prefix, identifier string, ttl time.Duration)
+
+	// GetNotFoundCache returns the remaining TTL if a not-found verdict is
+	// cached under the given (full) negative-cache key prefix
+	GetNotFoundCache(prefix, identifier string) (time.Duration, bool)
 
 	// Close closes the cache connection (for Redis)
 	Close() error

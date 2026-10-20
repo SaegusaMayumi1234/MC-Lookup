@@ -112,7 +112,10 @@ paths:
                   code: "INVALID_INPUT"
                   message: "Invalid identifier 'a': must be a valid Minecraft username (3-16 chars) or UUID"
         '404':
-          description: The configured minimum NOT_FOUND count was reached; the response message reports how many resolvers confirmed it.
+          description: >
+            The configured minimum NOT_FOUND count was reached; the response message reports how many resolvers confirmed it.
+            Conclusive not-found verdicts are cached briefly (cache.negative_ttl) and served without contacting upstreams;
+            cached responses carry a Cache-Control header and X-Cache-Status: HIT, with the message "Player not found (cached)".
           content:
             application/json:
               schema:
