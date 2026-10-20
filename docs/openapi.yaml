@@ -21,7 +21,7 @@ info:
     - `Cache-Control`: Standard HTTP cache directive, e.g. `public, max-age=300`
     - `X-Cache-Status`: `HIT` or `MISS` — whether the result was served from cache
     - `X-Resolver`: The resolver that sourced the data (present on both HIT and MISS)
-    - `X-Coalesced`: `true` if this request was deduplicated with a concurrent in-flight request for the same identifier
+    - `X-Coalesced`: `true` if this request was part of a coalesced group — it shares one result with a concurrent in-flight lookup for the same identifier (deduplicated follower) **or** it was the request that executed that shared lookup (the group's leader)
 
   version: 1.0.0
   contact:
@@ -86,7 +86,11 @@ paths:
               schema:
                 type: string
                 enum: ["true"]
-              description: Present and set to "true" if this request was coalesced with another concurrent in-flight request
+              description: |
+                Present and set to "true" if this request was part of a coalesced group.
+                Concurrent lookups for the same identifier share a single result via singleflight,
+                so both deduplicated followers **and** the leader that executed the shared lookup
+                receive this header.
           content:
             application/json:
               schema:

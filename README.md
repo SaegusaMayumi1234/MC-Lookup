@@ -32,3 +32,16 @@ resolver:
     - ashcon
     - playerdb
 ```
+
+## Response Headers
+
+Successful lookups return these headers:
+
+- `Cache-Control`: standard HTTP cache directive, e.g. `public, max-age=300`
+- `X-Cache-Status`: `HIT` or `MISS` — whether the result was served from cache
+- `X-Resolver`: the resolver that sourced the data (present on both HIT and MISS)
+- `X-Coalesced`: `"true"` if this request was **part of a coalesced group** — concurrent
+  requests for the same identifier are deduplicated via singleflight, and the result is
+  broadcast to the whole group. Both the request that executed the shared lookup (the
+  leader) and any deduplicated followers receive this header; the leader itself hits the
+  upstream, so do not treat the header as a guarantee of deduplication.

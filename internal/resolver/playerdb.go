@@ -60,7 +60,7 @@ func (r *PlayerDBResolver) Resolve(ctx context.Context, identifier string) (*mod
 		return nil, NewNotFoundError(r.Name(), identifier)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes))
 	if err != nil {
 		return nil, NewUpstreamError(r.Name(), resp.StatusCode, err)
 	}

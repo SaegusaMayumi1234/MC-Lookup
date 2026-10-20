@@ -51,7 +51,10 @@ func (h *PlayerHandler) GetPlayer(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Cache-Status", cacheStatus)
 	w.Header().Set("X-Resolver", result.Resolver)
 
-	// Indicate if this request was coalesced with another in-flight request
+	// Indicate that this request was part of a coalesced group: it either
+	// deduplicated against a concurrent in-flight lookup, or it was the
+	// leader that executed the shared lookup (singleflight broadcasts one
+	// shared result to all callers in the group).
 	if result.Coalesced {
 		w.Header().Set("X-Coalesced", "true")
 	}

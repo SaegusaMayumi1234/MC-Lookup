@@ -112,11 +112,12 @@ func NewTimeoutError(resolver string, cause error) *ResolverError {
 }
 
 // NewInvalidInputError creates an invalid input error
-func NewInvalidInputError(identifier string) *ResolverError {
+func NewInvalidInputError(resolver, identifier string) *ResolverError {
 	return &ResolverError{
 		Code:       constant.CodeInvalidInput,
 		Message:    fmt.Sprintf("Invalid identifier '%s': must be a valid Minecraft username (3-16 chars) or UUID", identifier),
 		StatusCode: http.StatusBadRequest,
+		Resolver:   resolver,
 	}
 }
 
@@ -128,7 +129,7 @@ func MapHTTPStatusToError(resolver string, statusCode int, identifier string) *R
 	case http.StatusTooManyRequests:
 		return NewRateLimitError(resolver, nil)
 	case http.StatusBadRequest:
-		return NewInvalidInputError(identifier)
+		return NewInvalidInputError(resolver, identifier)
 	default:
 		if statusCode >= 500 {
 			return NewUpstreamError(resolver, statusCode, nil)

@@ -30,14 +30,14 @@ func main() {
 	cfg, err := config.Load()
 	if err != nil {
 		logger.Error("Failed to load config", "error", err)
-		return
+		os.Exit(1)
 	}
 	logger.Info("config loaded", "app_name", cfg.App.Name, "env", cfg.App.Env)
 
 	cache, err := cache.NewRedisClient(ctx, cache.RedisConfig(cfg.Redis))
 	if err != nil {
 		logger.Error("Failed to connect to Redis", "error", err)
-		return
+		os.Exit(1)
 	}
 	logger.Info("redis connected")
 
@@ -46,7 +46,7 @@ func main() {
 		res := resolver.GetResolverByName(name, cfg.Resolver.GetResolverTimeout(), cfg.Resolver.UserAgent)
 		if res == nil {
 			logger.Error("Resolver listed in config is not registered", "resolver", name)
-			return
+			os.Exit(1)
 		}
 		resolvers = append(resolvers, res)
 	}

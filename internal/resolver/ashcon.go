@@ -53,7 +53,7 @@ func (r *AshconResolver) Resolve(ctx context.Context, identifier string) (*model
 		return nil, MapHTTPStatusToError(r.Name(), resp.StatusCode, identifier)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes))
 	if err != nil {
 		return nil, NewUpstreamError(r.Name(), resp.StatusCode, err)
 	}

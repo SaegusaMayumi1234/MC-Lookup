@@ -53,8 +53,9 @@ func NewPlayerService(resolvers []resolver.Resolver, strategy string, c cache.Ca
 // Resolve attempts to resolve a player identifier using the configured strategy and resolvers.
 func (s *PlayerService) Resolve(ctx context.Context, identifier string) *ResolveResult {
 	if !model.IsValidIdentifier(identifier) {
+		// Service-level validation; no resolver is involved, so the error carries no resolver name.
 		return &ResolveResult{
-			Error: resolver.NewInvalidInputError(identifier),
+			Error: resolver.NewInvalidInputError("", identifier),
 		}
 	}
 
@@ -250,6 +251,10 @@ func noResolversResult() *ResolveResult {
 func buildErrorDetails(errors []*resolver.ResolverError) map[string]string {
 	details := make(map[string]string)
 	for _, err := range errors {
+		// Skip empty resolver names so the JSON details map never gets a "" key.
+		if err.Resolver == "" {
+			continue
+		}
 		details[err.Resolver] = err.Message
 	}
 	return details

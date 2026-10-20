@@ -29,6 +29,11 @@ func GetResolverByName(name string, timeout time.Duration, userAgent string) Res
 	}
 }
 
+// maxResponseBodyBytes caps how many bytes are read from an upstream
+// response body (1 MiB). Player records are a few hundred bytes at most,
+// so this only guards against misbehaving or malicious upstreams.
+const maxResponseBodyBytes = 1 << 20
+
 // BaseResolver provides common functionality for all resolvers
 type BaseResolver struct {
 	name      string
