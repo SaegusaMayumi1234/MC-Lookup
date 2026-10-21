@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +41,7 @@ type PlayerService struct {
 	negativeCacheTTL     time.Duration
 	sfGroup              singleflight.Group
 	inflightResolves     sync.WaitGroup
+	logger               *slog.Logger
 }
 
 func NewPlayerService(
@@ -51,8 +54,13 @@ func NewPlayerService(
 	negativeCacheEnabled bool,
 	negativeCachePrefix string,
 	negativeCacheTTL time.Duration,
+	logger *slog.Logger,
 ) *PlayerService {
 	strategy = strings.ToLower(strings.TrimSpace(strategy))
+
+	if logger == nil {
+		logger = slog.Default()
+	}
 
 	return &PlayerService{
 		resolvers:            resolvers,
@@ -64,6 +72,7 @@ func NewPlayerService(
 		negativeCacheEnabled: negativeCacheEnabled,
 		negativeCachePrefix:  negativeCachePrefix,
 		negativeCacheTTL:     negativeCacheTTL,
+		logger:               logger,
 	}
 }
 
@@ -112,10 +121,7 @@ func (s *PlayerService) Resolve(ctx context.Context, identifier string) *Resolve
 			return cached, nil
 		}
 
-		// track inflightResolves for graceful shutdown.
-		s.inflightResolves.Add(1)
-		result := s.doResolve(resolveCtx, identifier)
-		s.inflightResolves.Done()
+		result := s.doResolveTracked(resolveCtx, identifier)
 
 		return result, nil
 	})
@@ -125,16 +131,27 @@ func (s *PlayerService) Resolve(ctx context.Context, identifier string) *Resolve
 		return &ResolveResult{Error: ctx.Err()}
 	case result := <-resultCh:
 		if result.Err != nil {
+			s.logger.Error("singleflight resolve failed", "error", result.Err)
 			return &ResolveResult{
 				Error: &resolver.ResolverError{
 					Code:       constant.CodeInternalServerError,
-					Message:    result.Err.Error(),
+					Message:    "Internal server error",
 					StatusCode: http.StatusInternalServerError,
 				},
 			}
 		}
 
-		res := result.Val.(*ResolveResult)
+		res, ok := result.Val.(*ResolveResult)
+		if !ok {
+			s.logger.Error("unexpected singleflight result type", "value", result.Val)
+			return &ResolveResult{
+				Error: &resolver.ResolverError{
+					Code:       constant.CodeInternalServerError,
+					Message:    "Internal server error",
+					StatusCode: http.StatusInternalServerError,
+				},
+			}
+		}
 
 		callerResult := *res
 		if result.Shared && !callerResult.CacheHit {
@@ -142,6 +159,27 @@ func (s *PlayerService) Resolve(ctx context.Context, identifier string) *Resolve
 		}
 		return &callerResult
 	}
+}
+
+// doResolveTracked runs doResolve while tracking it in inflightResolves for graceful shutdown; both Add and deferred Done live here.
+func (s *PlayerService) doResolveTracked(ctx context.Context, identifier string) *ResolveResult {
+	s.inflightResolves.Add(1)
+	defer s.inflightResolves.Done()
+	return s.doResolve(ctx, identifier)
+}
+
+// safeResolve calls res.Resolve and converts panics into errors; a panic escaping the singleflight closure crashes the process.
+func (s *PlayerService) safeResolve(ctx context.Context, res resolver.Resolver, identifier string) (p *model.Player, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("panic in resolver",
+				"resolver", res.Name(), "panic", r, "stack", string(debug.Stack()))
+			p = nil
+			err = fmt.Errorf("resolver panicked: %v", r)
+		}
+	}()
+
+	return res.Resolve(ctx, identifier)
 }
 
 // doResolve dispatches player resolution to the configured strategy.
@@ -184,7 +222,7 @@ func (s *PlayerService) doResolveRace(ctx context.Context, identifier string) *R
 		go func(res resolver.Resolver) {
 			defer wg.Done()
 
-			p, err := res.Resolve(resolveCtx, identifier)
+			p, err := s.safeResolve(resolveCtx, res, identifier)
 
 			var resErr *resolver.ResolverError
 			if err != nil {
@@ -230,7 +268,7 @@ func (s *PlayerService) doResolveFallback(ctx context.Context, identifier string
 	errors := make([]*resolver.ResolverError, 0, len(s.resolvers))
 
 	for _, res := range s.resolvers {
-		player, err := res.Resolve(ctx, identifier)
+		player, err := s.safeResolve(ctx, res, identifier)
 
 		if err == nil && player != nil {
 			return s.newSuccessfulResolveResult(player, res.Name())

@@ -41,6 +41,9 @@ func (cfg *Config) Validate() error {
 	if err := validatePositiveSeconds("api.write_timeout", cfg.Api.WriteTimeout); err != nil {
 		return err
 	}
+	if err := validatePositiveSeconds("api.idle_timeout", cfg.Api.IdleTimeout); err != nil {
+		return err
+	}
 	if err := validatePositiveSeconds("resolver.timeout", cfg.Resolver.Timeout); err != nil {
 		return err
 	}

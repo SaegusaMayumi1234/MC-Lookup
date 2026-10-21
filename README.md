@@ -12,6 +12,7 @@ Configuration is loaded from `config.yaml` in the working directory (`config.exa
 | `api.port` | — | HTTP listen port (1–65535). |
 | `api.read_timeout` | — | Seconds allowed for reading a request (must be > 0). |
 | `api.write_timeout` | — | Seconds allowed for writing a response. Must cover the worst-case resolve time — see [Timeout Budget](#timeout-budget). |
+| `api.idle_timeout` | `60` | Max seconds a keep-alive connection may sit idle between requests. Keep it below your load balancer's idle timeout so the server closes stale connections first. |
 | `redis.addr` | — | Redis `host:port` address; the connection is verified at startup. |
 | `redis.password` | `""` | Redis password (optional). |
 | `redis.db` | `0` | Redis database index (>= 0). |
@@ -82,6 +83,8 @@ Negative entries live under their own key namespace, `cache.negative_prefix` (de
 - `race` strategy: `resolver.timeout`
 
 plus a small margin for response serialization. With the default 4 resolvers × 5s timeout, set `api.write_timeout` to at least 22 (the example config ships `30`). A too-small write timeout causes responses to die mid-write: clients see dead connections instead of JSON errors.
+
+`api.idle_timeout` is independent of this budget: it bounds how long a keep-alive connection may sit idle between requests. Without it, the server silently reuses `api.read_timeout` for that purpose, so the connection lifecycle would accidentally follow the read timeout. Keep it below the idle timeout of any load balancer in front of the API so the server closes stale connections first — clients are then never handed a connection the load balancer has already dropped.
 
 ## Response Headers
 

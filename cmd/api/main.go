@@ -80,6 +80,7 @@ func run(logger *slog.Logger) error {
 		cfg.Cache.IsNegativeCacheEnabled(),
 		cfg.Cache.GetNegativeCachePrefix(),
 		cfg.Cache.GetNegativeTTL(),
+		logger,
 	)
 
 	router := api.NewRouter(api.RouterDeps{
@@ -95,6 +96,7 @@ func run(logger *slog.Logger) error {
 		Handler:      router,
 		ReadTimeout:  time.Duration(cfg.Api.ReadTimeout) * time.Second,
 		WriteTimeout: time.Duration(cfg.Api.WriteTimeout) * time.Second,
+		IdleTimeout:  time.Duration(cfg.Api.IdleTimeout) * time.Second,
 	}
 
 	serverErr := make(chan error, 1)

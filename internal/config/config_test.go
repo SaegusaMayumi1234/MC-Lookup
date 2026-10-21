@@ -10,7 +10,7 @@ import (
 func validConfig() *Config {
 	return &Config{
 		App:   AppConfig{Name: "mc-lookup", Env: "dev"},
-		Api:   ApiConfig{Port: 8080, ReadTimeout: 5, WriteTimeout: 30},
+		Api:   ApiConfig{Port: 8080, ReadTimeout: 5, WriteTimeout: 30, IdleTimeout: 60},
 		Redis: RedisConfig{Addr: "localhost:6379", Password: "", DB: 0, MaxRetries: -1},
 		Cache: CacheConfig{TTL: 3600, Prefix: "mc-lookup:", NegativeEnabled: true, NegativePrefix: "nf:", NegativeTTL: 300},
 		Resolver: ResolverConfig{
@@ -54,6 +54,11 @@ func TestValidate(t *testing.T) {
 			name:    "write_timeout zero",
 			mutate:  func(c *Config) { c.Api.WriteTimeout = 0 },
 			wantErr: "api.write_timeout must be greater than zero",
+		},
+		{
+			name:    "idle_timeout zero",
+			mutate:  func(c *Config) { c.Api.IdleTimeout = 0 },
+			wantErr: "api.idle_timeout must be greater than zero",
 		},
 		{
 			name:    "resolver timeout zero",
@@ -318,6 +323,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.Cache.NegativePrefix != "nf:" {
 		t.Errorf("expected cache.negative_prefix to default to \"nf:\", got %q", cfg.Cache.NegativePrefix)
+	}
+	if cfg.Api.IdleTimeout != 60 {
+		t.Errorf("expected api.idle_timeout to default to 60, got %d", cfg.Api.IdleTimeout)
 	}
 	if got := cfg.Cache.GetNegativeCachePrefix(); got != "test:nf:" {
 		t.Errorf("expected composed negative prefix \"test:nf:\", got %q", got)

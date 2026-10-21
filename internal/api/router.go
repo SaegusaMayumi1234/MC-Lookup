@@ -37,7 +37,7 @@ func NewRouter(d RouterDeps) *chi.Mux {
 	r.NotFound(NotFoundHandler(d.Logger))
 	r.MethodNotAllowed(MethodNotAllowedHandler(d.Logger))
 
-	playerHandler := NewPlayerHandler(d.Services.Players)
+	playerHandler := NewPlayerHandler(d.Logger, d.Services.Players)
 
 	if d.Env == "dev" {
 		docsHandler := NewDocsHandler(docs.SwaggerHTML, docs.OpenAPIYAML)

@@ -4,6 +4,7 @@ import (
 	"encoding/json/v2"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"time"
 
 	"github.com/saegusamayumi1234/mc-lookup/internal/constant"
@@ -36,7 +37,7 @@ func RecoveryMiddleware(logger *slog.Logger) func(next http.Handler) http.Handle
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			defer func() {
 				if err := recover(); err != nil {
-					logger.Error("PANIC", "error", err)
+					logger.Error("PANIC", "error", err, "stack", string(debug.Stack()))
 
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusInternalServerError)

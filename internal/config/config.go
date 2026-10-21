@@ -29,6 +29,7 @@ type ApiConfig struct {
 	Port         int `mapstructure:"port"`
 	ReadTimeout  int `mapstructure:"read_timeout"`
 	WriteTimeout int `mapstructure:"write_timeout"`
+	IdleTimeout  int `mapstructure:"idle_timeout"`
 }
 
 type RedisConfig struct {
@@ -86,6 +87,7 @@ func Load() (*Config, error) {
 	v.SetConfigName("config")
 	v.SetConfigType("yaml")
 	v.AddConfigPath(".")
+	v.SetDefault("api.idle_timeout", 60)
 	v.SetDefault("resolver.strategy", constant.StrategyFallback)
 	v.SetDefault("resolver.not_found_min_count", 3)
 	v.SetDefault("cache.negative_enabled", true)

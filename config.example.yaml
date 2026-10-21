@@ -6,6 +6,7 @@ api:
   port: 8080
   read_timeout: 5
   write_timeout: 30
+  idle_timeout: 60
 
 redis:
   addr: localhost:6379

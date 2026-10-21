@@ -16,11 +16,13 @@ import (
 // PlayerHandler handles HTTP requests related to player resolution.
 type PlayerHandler struct {
 	service *service.PlayerService
+	logger  *slog.Logger
 }
 
-func NewPlayerHandler(service *service.PlayerService) *PlayerHandler {
+func NewPlayerHandler(logger *slog.Logger, service *service.PlayerService) *PlayerHandler {
 	return &PlayerHandler{
 		service: service,
+		logger:  logger,
 	}
 }
 
@@ -109,10 +111,11 @@ func (h *PlayerHandler) writeError(w http.ResponseWriter, err error) {
 		return
 	}
 
-	// Generic error
+	h.logger.Error("internal error handled by generic branch", "error", err)
+
 	errResp.Error = ErrorResult{
 		Code:    constant.CodeInternalServerError,
-		Message: err.Error(),
+		Message: "Internal server error",
 	}
 
 	h.writeJSON(w, http.StatusInternalServerError, errResp)
