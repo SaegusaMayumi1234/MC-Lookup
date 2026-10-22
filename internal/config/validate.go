@@ -26,7 +26,6 @@ func (cfg *Config) Validate() error {
 	}
 	cfg.Redis.Addr = strings.TrimSpace(cfg.Redis.Addr)
 	cfg.Cache.Prefix = strings.TrimSpace(cfg.Cache.Prefix)
-	cfg.Cache.NegativePrefix = strings.TrimSpace(cfg.Cache.NegativePrefix)
 	cfg.Resolver.UserAgent = strings.TrimSpace(cfg.Resolver.UserAgent)
 
 	if !slices.Contains(constant.KnownStrategies(), cfg.Resolver.Strategy) {
@@ -50,19 +49,14 @@ func (cfg *Config) Validate() error {
 	if strings.TrimSpace(cfg.Resolver.UserAgent) == "" {
 		return fmt.Errorf("resolver.user_agent cannot be empty")
 	}
-	if err := validatePositiveSeconds("cache.ttl", cfg.Cache.TTL); err != nil {
-		return err
-	}
 	if cfg.Cache.Prefix == "" {
 		return fmt.Errorf("cache.prefix cannot be empty")
 	}
-	if cfg.Cache.NegativePrefix == "" {
-		return fmt.Errorf("cache.negative_prefix cannot be empty: negative entries would collide with player entries")
+	if err := validateNonNegativeSeconds("cache.ttl", cfg.Cache.TTL); err != nil {
+		return err
 	}
-	if cfg.Cache.NegativeEnabled {
-		if err := validatePositiveSeconds("cache.negative_ttl", cfg.Cache.NegativeTTL); err != nil {
-			return err
-		}
+	if err := validateNonNegativeSeconds("cache.negative_ttl", cfg.Cache.NegativeTTL); err != nil {
+		return err
 	}
 	if strings.TrimSpace(cfg.Redis.Addr) == "" {
 		return fmt.Errorf("redis.addr cannot be empty")
@@ -118,7 +112,7 @@ func (cfg *Config) Warnings() []string {
 		warnings = append(warnings, fmt.Sprintf(format, args...))
 	}
 
-	if cfg.Cache.NegativeEnabled && cfg.Cache.NegativeTTL > cfg.Cache.TTL {
+	if cfg.Cache.TTL > 0 && cfg.Cache.NegativeTTL > cfg.Cache.TTL {
 		add("cache.negative_ttl (%ds) is greater than cache.ttl (%ds); not-found verdicts will outlive positive entries",
 			cfg.Cache.NegativeTTL, cfg.Cache.TTL)
 	}
@@ -134,7 +128,7 @@ func (cfg *Config) Warnings() []string {
 		add("resolver.timeout (%ds) is high; with the fallback strategy every failing resolver can add up to this to the response time",
 			cfg.Resolver.Timeout)
 	}
-	if cfg.Cache.TTL < 60 {
+	if cfg.Cache.TTL > 0 && cfg.Cache.TTL < 60 {
 		add("cache.ttl (%ds) is short; entries will churn quickly and increase upstream traffic",
 			cfg.Cache.TTL)
 	}
@@ -162,6 +156,19 @@ func (cfg *Config) resolveBudgetDetail() string {
 			len(cfg.Resolver.List), cfg.Resolver.Timeout, cfg.worstCaseResolveSeconds(), cfg.Resolver.Strategy)
 	}
 	return fmt.Sprintf("resolver.timeout (%ds) with strategy %q", cfg.Resolver.Timeout, cfg.Resolver.Strategy)
+}
+
+// validateNonNegativeSeconds allows 0 (meaning the feature is disabled) but
+// rejects negative values.
+func validateNonNegativeSeconds(name string, seconds int) error {
+	if seconds < 0 {
+		return fmt.Errorf("%s cannot be negative", name)
+	}
+	const maxDurationSeconds = int64((1<<63 - 1) / int64(time.Second))
+	if int64(seconds) > maxDurationSeconds {
+		return fmt.Errorf("%s is too large", name)
+	}
+	return nil
 }
 
 func validatePositiveSeconds(name string, seconds int) error {

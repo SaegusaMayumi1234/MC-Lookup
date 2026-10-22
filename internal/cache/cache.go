@@ -1,54 +1,16 @@
 package cache
 
 import (
+	"encoding/json/jsontext"
 	"time"
 )
 
-type PlayerData struct {
-	UUID     string
-	Username string
-}
-
-type Entry struct {
-	Player    *PlayerData
-	CachedAt  time.Time
-	ExpiresAt time.Time
-	Resolver  string
-}
-
-// TTL returns the remaining time-to-live
-func (e *Entry) TTL() time.Duration {
-	remaining := time.Until(e.ExpiresAt)
-	if remaining < 0 {
-		return 0
-	}
-	return remaining
-}
-
-func (e *Entry) Age() time.Duration {
-	return time.Since(e.CachedAt)
-}
-
-// IsExpired checks if the entry has expired
-func (e *Entry) IsExpired() bool {
-	return time.Now().After(e.ExpiresAt)
-}
-
-// Cache defines the interface for player caching
 type Cache interface {
-	// SetPlayerCache stores a player in cache with the given TTL
-	SetPlayerCache(prefix string, p *PlayerData, resolver string, ttl time.Duration)
+	// SetCacheBulk sets multiple cache entries with the same data and TTL.
+	SetCacheBulk([]string, any, time.Duration) error
 
-	// GetPlayerCache retrieves a player from cache by key (normalized identifier)
-	GetPlayerCache(prefix string, identifier string) (*Entry, bool)
-
-	// SetNotFoundCache stores a negative (not-found) verdict under the given
-	// (full) negative-cache key prefix
-	SetNotFoundCache(prefix, identifier string, ttl time.Duration)
-
-	// GetNotFoundCache returns the remaining TTL if a not-found verdict is
-	// cached under the given (full) negative-cache key prefix
-	GetNotFoundCache(prefix, identifier string) (time.Duration, bool)
+	// GetCache retrieves a cache entry by key. It returns the raw cached payload, the time it was cached, the TTL, a boolean indicating if it was found, and an error if any occurred.
+	GetCache(key string) (jsontext.Value, time.Time, time.Duration, bool, error)
 
 	// Close closes the cache connection (for Redis)
 	Close() error

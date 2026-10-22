@@ -12,7 +12,7 @@ func validConfig() *Config {
 		App:   AppConfig{Name: "mc-lookup", Env: "dev"},
 		Api:   ApiConfig{Port: 8080, ReadTimeout: 5, WriteTimeout: 30, IdleTimeout: 60},
 		Redis: RedisConfig{Addr: "localhost:6379", Password: "", DB: 0, MaxRetries: -1},
-		Cache: CacheConfig{TTL: 3600, Prefix: "mc-lookup:", NegativeEnabled: true, NegativePrefix: "nf:", NegativeTTL: 300},
+		Cache: CacheConfig{TTL: 3600, Prefix: "mc-lookup:", NegativeTTL: 300},
 		Resolver: ResolverConfig{
 			Timeout:          5,
 			UserAgent:        "mc-lookup/1.0",
@@ -69,11 +69,6 @@ func TestValidate(t *testing.T) {
 			name:    "empty user agent",
 			mutate:  func(c *Config) { c.Resolver.UserAgent = "  " },
 			wantErr: "resolver.user_agent cannot be empty",
-		},
-		{
-			name:    "cache ttl zero",
-			mutate:  func(c *Config) { c.Cache.TTL = 0 },
-			wantErr: "cache.ttl must be greater than zero",
 		},
 		{
 			name:    "empty cache prefix",
@@ -154,23 +149,30 @@ func TestValidate(t *testing.T) {
 			wantErr: "api.write_timeout (5s) cannot cover the worst-case resolve time (resolver.timeout (5s) with strategy \"race\")",
 		},
 		{
-			name:    "empty negative prefix",
-			mutate:  func(c *Config) { c.Cache.NegativePrefix = "" },
-			wantErr: "cache.negative_prefix cannot be empty",
+			name: "cache ttl zero disables player caching",
+			mutate: func(c *Config) {
+				c.Cache.TTL = 0
+			},
 		},
 		{
-			name: "negative_ttl zero while enabled",
+			name: "negative cache ttl",
+			mutate: func(c *Config) {
+				c.Cache.TTL = -1
+			},
+			wantErr: "cache.ttl cannot be negative",
+		},
+		{
+			name: "negative_ttl zero disables negative caching",
 			mutate: func(c *Config) {
 				c.Cache.NegativeTTL = 0
 			},
-			wantErr: "cache.negative_ttl must be greater than zero",
 		},
 		{
-			name: "negative_ttl zero while disabled",
+			name: "negative negative_ttl",
 			mutate: func(c *Config) {
-				c.Cache.NegativeEnabled = false
-				c.Cache.NegativeTTL = 0
+				c.Cache.NegativeTTL = -5
 			},
+			wantErr: "cache.negative_ttl cannot be negative",
 		},
 	}
 
@@ -315,20 +317,11 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatalf("expected config to load, got: %v", err)
 	}
 
-	if !cfg.Cache.NegativeEnabled {
-		t.Errorf("expected cache.negative_enabled to default to true")
-	}
 	if cfg.Cache.NegativeTTL != 300 {
 		t.Errorf("expected cache.negative_ttl to default to 300, got %d", cfg.Cache.NegativeTTL)
 	}
-	if cfg.Cache.NegativePrefix != "nf:" {
-		t.Errorf("expected cache.negative_prefix to default to \"nf:\", got %q", cfg.Cache.NegativePrefix)
-	}
 	if cfg.Api.IdleTimeout != 60 {
 		t.Errorf("expected api.idle_timeout to default to 60, got %d", cfg.Api.IdleTimeout)
-	}
-	if got := cfg.Cache.GetNegativeCachePrefix(); got != "test:nf:" {
-		t.Errorf("expected composed negative prefix \"test:nf:\", got %q", got)
 	}
 	if cfg.Resolver.Strategy != "fallback" {
 		t.Errorf("expected resolver.strategy to default to fallback, got %q", cfg.Resolver.Strategy)
@@ -349,6 +342,22 @@ func TestLoadUnknownKey(t *testing.T) {
 	}
 }
 
+// The removed cache.negative_prefix key is rejected by typo protection:
+// deployed configs that still carry it fail startup with the key named.
+func TestLoadLegacyNegativePrefixKeyRejected(t *testing.T) {
+	writeConfigFile(t, loadFixtureYAML+`
+  negative_prefix: "nf:"
+`)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected the removed cache.negative_prefix key to fail config load")
+	}
+	if !strings.Contains(err.Error(), "cache.negative_prefix") {
+		t.Fatalf("expected error to name the unknown key, got: %v", err)
+	}
+}
+
 func TestLoadEnvOverride(t *testing.T) {
 	writeConfigFile(t, loadFixtureYAML)
 	t.Setenv("CACHE_NEGATIVE_TTL", "120")
@@ -363,16 +372,16 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 }
 
-func TestLoadEnvOverrideBool(t *testing.T) {
+func TestLoadEnvOverrideNegativeTTLZero(t *testing.T) {
 	writeConfigFile(t, loadFixtureYAML)
-	t.Setenv("CACHE_NEGATIVE_ENABLED", "false")
+	t.Setenv("CACHE_NEGATIVE_TTL", "0")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("expected config to load, got: %v", err)
 	}
 
-	if cfg.Cache.NegativeEnabled {
-		t.Errorf("expected cache.negative_enabled overridden to false via env")
+	if cfg.Cache.NegativeTTL != 0 {
+		t.Errorf("expected cache.negative_ttl overridden to 0 (disabled) via env, got %d", cfg.Cache.NegativeTTL)
 	}
 }

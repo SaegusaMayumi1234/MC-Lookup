@@ -40,11 +40,9 @@ type RedisConfig struct {
 }
 
 type CacheConfig struct {
-	TTL             int    `mapstructure:"ttl"`
-	Prefix          string `mapstructure:"prefix"`
-	NegativeEnabled bool   `mapstructure:"negative_enabled"`
-	NegativePrefix  string `mapstructure:"negative_prefix"`
-	NegativeTTL     int    `mapstructure:"negative_ttl"`
+	Prefix      string `mapstructure:"prefix"`
+	TTL         int    `mapstructure:"ttl"`
+	NegativeTTL int    `mapstructure:"negative_ttl"`
 }
 
 type ResolverConfig struct {
@@ -55,28 +53,14 @@ type ResolverConfig struct {
 	NotFoundMinCount int      `mapstructure:"not_found_min_count"`
 }
 
-// GetCacheTTL returns cache TTL as time.Duration
 func (c *CacheConfig) GetCacheTTL() time.Duration {
 	return time.Duration(c.TTL) * time.Second
 }
 
-// IsNegativeCacheEnabled reports whether conclusive not-found verdicts should be cached.
-func (c *CacheConfig) IsNegativeCacheEnabled() bool {
-	return c.NegativeEnabled && c.NegativeTTL > 0
-}
-
-// GetNegativeTTL returns the negative-cache TTL as time.Duration
 func (c *CacheConfig) GetNegativeTTL() time.Duration {
 	return time.Duration(c.NegativeTTL) * time.Second
 }
 
-// GetNegativeCachePrefix returns the full key prefix for negative entries:
-// cache.prefix + cache.negative_prefix.
-func (c *CacheConfig) GetNegativeCachePrefix() string {
-	return c.Prefix + c.NegativePrefix
-}
-
-// GetResolverTimeout returns resolver timeout as time.Duration
 func (c *ResolverConfig) GetResolverTimeout() time.Duration {
 	return time.Duration(c.Timeout) * time.Second
 }
@@ -90,8 +74,6 @@ func Load() (*Config, error) {
 	v.SetDefault("api.idle_timeout", 60)
 	v.SetDefault("resolver.strategy", constant.StrategyFallback)
 	v.SetDefault("resolver.not_found_min_count", 3)
-	v.SetDefault("cache.negative_enabled", true)
-	v.SetDefault("cache.negative_prefix", "nf:")
 	v.SetDefault("cache.negative_ttl", 300)
 
 	v.AutomaticEnv()

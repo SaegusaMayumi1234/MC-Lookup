@@ -22,11 +22,9 @@ Configuration is loaded from `config.yaml` in the working directory (`config.exa
 | `resolver.strategy` | `fallback` | `race` or `fallback` — see [Resolver Strategy Config](#resolver-strategy-config). |
 | `resolver.list` | — | Resolver names — order for `fallback`, toggle set for `race`. Known names: `mojang`, `playerdb`, `ashcon`, `mowojang`; duplicates rejected. |
 | `resolver.not_found_min_count` | `3` | NOT_FOUND quorum size (1 to number of resolvers) — see [Resolver Strategy Config](#resolver-strategy-config). |
-| `cache.ttl` | — | Player entry TTL in seconds (must be > 0) — see [Caching](#caching). |
 | `cache.prefix` | — | Redis key prefix for player entries (must be non-empty). |
-| `cache.negative_enabled` | `true` | Cache conclusive not-found verdicts — see [Caching](#caching). |
-| `cache.negative_ttl` | `300` | Not-found verdict TTL in seconds (must be >= 1 when negative caching is enabled). |
-| `cache.negative_prefix` | `"nf:"` | Key namespace appended to `cache.prefix` for negative entries (must be non-empty). |
+| `cache.ttl` | — | Player entry TTL in seconds; `0` (or unset) disables player caching — see [Caching](#caching). |
+| `cache.negative_ttl` | `300` | Not-found verdict TTL in seconds; `0` disables negative caching. |
 
 Unknown keys fail startup with the offending key names (typo protection), invalid values fail startup with a specific error, and advisory issues are logged once at startup as `config warning` lines: `cache.negative_ttl` greater than `cache.ttl`, a NOT_FOUND quorum below half of the resolver count, an unrecognized `app.env`, `resolver.timeout` above 10s, `cache.ttl` below 60s, or `redis.max_retries` above 5.
 
@@ -64,16 +62,14 @@ resolver:
 
 ## Caching
 
-Lookups are cached in Redis under `cache.prefix` (by username and by UUID) for `cache.ttl` seconds.
+Lookups are cached in Redis under `cache.prefix` (by username and by UUID) for `cache.ttl` seconds. A TTL of `0` (or an unset `cache.ttl`) disables player caching entirely — cache probes are skipped, and successful resolves are not written.
 
-**Negative caching**: when the NOT_FOUND quorum is reached, the 404 verdict itself is cached for `cache.negative_ttl` seconds (`cache.negative_enabled: true` by default). Repeat lookups for a nonexistent player then return 404 without contacting any upstream — this protects upstream rate-limit budgets (e.g. Mojang's ~600 requests / 10 min) from floods of invalid identifiers. Two consequences to be aware of:
+**Negative caching**: when the NOT_FOUND quorum is reached, the 404 verdict itself is cached for `cache.negative_ttl` seconds. Repeat lookups for a nonexistent player then return 404 without contacting any upstream — this protects upstream rate-limit budgets (e.g. Mojang's ~600 requests / 10 min) from floods of invalid identifiers. Two consequences to be aware of:
 
-- A player registered *very* recently may briefly return 404 until the negative entry expires.
+- A player registered *very* recently may briefly return 404 until the negative entry expires. A successful resolve overwrites the negative entry at the same key immediately — only when positive caching is enabled (`cache.ttl` > 0). With `cache.ttl: 0` no entry is ever written on success, so a freshly registered player keeps returning 404 until the negative entry expires on its own.
 - With a low `resolver.not_found_min_count`, a verdict can be reached (and cached) while some resolvers only timed out.
 
-Set `cache.negative_enabled: false` to disable.
-
-Negative entries live under their own key namespace, `cache.negative_prefix` (default `nf:`, keys look like `mc-lookup:nf:<identifier>`), so they can be inspected or purged independently of player entries.
+Set `cache.negative_ttl: 0` to disable negative caching. Negative entries share the same Redis keyspace as player entries (a not-found verdict is simply an entry without a player payload) and are probed with a single roundtrip, so they cannot be inspected or purged independently of player entries.
 
 ## Timeout Budget
 

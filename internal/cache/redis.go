@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
@@ -9,7 +10,6 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/saegusamayumi1234/mc-lookup/internal/model"
 )
 
 type RedisConfig struct {
@@ -26,9 +26,8 @@ type RedisClient struct {
 
 // redisEntry is the serialized form of a cache entry
 type redisEntry struct {
-	Player   *PlayerData `json:"player"`
-	CachedAt int64       `json:"cached_at"`
-	Resolver string      `json:"resolver"`
+	Data     jsontext.Value `json:"data,omitempty"`
+	CachedAt int64          `json:"cached_at"`
 }
 
 // NewRedisClient creates a new Redis client and verifies the connection.
@@ -51,107 +50,64 @@ func NewRedisClient(ctx context.Context, cfg RedisConfig, logger *slog.Logger) (
 	return &RedisClient{client: client, logger: logger}, nil
 }
 
-func (rc *RedisClient) SetPlayerCache(prefix string, p *PlayerData, resolver string, ttl time.Duration) {
-	if ttl <= 0 {
-		return
+func (rc *RedisClient) SetCacheBulk(keys []string, data any, ttl time.Duration) error {
+	if len(keys) == 0 {
+		return nil
 	}
 
-	ctx := context.Background()
-	usernameKey := prefix + model.NormalizeIdentifier(p.Username)
-	uuidKey := prefix + model.NormalizeIdentifier(p.UUID)
+	// Marshal the data into JSON for storage in Redis
+	payload, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
 
 	re := redisEntry{
-		Player:   p,
+		Data:     jsontext.Value(payload),
 		CachedAt: time.Now().Unix(),
-		Resolver: resolver,
 	}
 
-	data, err := json.Marshal(re)
+	value, err := json.Marshal(re)
 	if err != nil {
-		rc.logger.Warn("redis cache marshal failed", "error", err)
-		return
-	}
-
-	pipe := rc.client.Pipeline()
-	pipe.Set(ctx, usernameKey, data, ttl)
-	pipe.Set(ctx, uuidKey, data, ttl)
-	if _, err := pipe.Exec(ctx); err != nil {
-		rc.logger.Warn("redis cache write failed", "error", err)
-	}
-}
-
-func (rc *RedisClient) GetPlayerCache(prefix string, identifier string) (*Entry, bool) {
-	ctx := context.Background()
-	key := prefix + model.NormalizeIdentifier(identifier)
-
-	pipe := rc.client.Pipeline()
-	getCmd := pipe.Get(ctx, key)
-	ttlCmd := pipe.TTL(ctx, key)
-	_, err := pipe.Exec(ctx)
-
-	// redis.Nil means the key is missing: a normal cache miss, not a failure.
-	if err != nil {
-		if !errors.Is(err, redis.Nil) {
-			rc.logger.Warn("redis cache read failed", "error", err)
-		}
-		return nil, false
-	}
-
-	data, err := getCmd.Bytes()
-	if err != nil {
-		if !errors.Is(err, redis.Nil) {
-			rc.logger.Warn("redis cache read failed", "error", err)
-		}
-		return nil, false
-	}
-
-	ttl := ttlCmd.Val()
-	if ttl < 0 {
-		// Redis reports -1 for keys with no expiry and -2 for missing keys.
-		// Never serve legacy entries that were accidentally stored persistently.
-		if ttl == -1 {
-			_ = rc.client.Del(ctx, key).Err()
-		}
-		return nil, false
-	}
-
-	var re redisEntry
-	if err := json.Unmarshal(data, &re); err != nil {
-		rc.logger.Warn("redis cache decode failed", "key", key, "error", err)
-		return nil, false
-	}
-
-	entry := &Entry{
-		Player:    re.Player,
-		CachedAt:  time.Unix(re.CachedAt, 0),
-		ExpiresAt: time.Now().Add(ttl),
-		Resolver:  re.Resolver,
-	}
-
-	return entry, true
-}
-
-func (rc *RedisClient) SetNotFoundCache(prefix, identifier string, ttl time.Duration) {
-	if ttl <= 0 {
-		return
+		return err
 	}
 
 	ctx := context.Background()
-	key := prefix + model.NormalizeIdentifier(identifier)
+	_, err = rc.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		for _, key := range keys {
+			pipe.Set(ctx, key, value, ttl)
+		}
+		return nil
+	})
 
-	if err := rc.client.Set(ctx, key, "true", ttl).Err(); err != nil {
-		rc.logger.Warn("redis cache write failed", "error", err)
-	}
+	return err
 }
 
-func (rc *RedisClient) GetNotFoundCache(prefix, identifier string) (time.Duration, bool) {
-	ctx := context.Background()
-	key := prefix + model.NormalizeIdentifier(identifier)
+func (rc *RedisClient) GetCache(key string) (data jsontext.Value, cachedAt time.Time, ttl time.Duration, found bool, err error) {
+	var getCmd *redis.StringCmd
+	var ttlCmd *redis.DurationCmd
 
-	ttl, err := rc.client.TTL(ctx, key).Result()
-	if err != nil {
-		rc.logger.Warn("redis cache read failed", "error", err)
-		return 0, false
+	ctx := context.Background()
+	_, err = rc.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		getCmd = pipe.Get(ctx, key)
+		ttlCmd = pipe.TTL(ctx, key)
+		return nil
+	})
+
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return data, time.Time{}, 0, false, err
+	}
+
+	raw, getErr := getCmd.Bytes()
+	if errors.Is(getErr, redis.Nil) {
+		return data, time.Time{}, 0, false, nil
+	}
+	if getErr != nil {
+		return data, time.Time{}, 0, false, getErr
+	}
+
+	ttl, ttlErr := ttlCmd.Result()
+	if ttlErr != nil {
+		return data, time.Time{}, 0, false, ttlErr
 	}
 
 	if ttl < 0 {
@@ -160,10 +116,15 @@ func (rc *RedisClient) GetNotFoundCache(prefix, identifier string) (time.Duratio
 		if ttl == -1 {
 			_ = rc.client.Del(ctx, key).Err()
 		}
-		return 0, false
+		return nil, time.Time{}, 0, false, nil
 	}
 
-	return ttl, true
+	var entry redisEntry
+	if err := json.Unmarshal(raw, &entry); err != nil {
+		return nil, time.Time{}, 0, false, err
+	}
+
+	return entry.Data, time.Unix(entry.CachedAt, 0), ttl, true, nil
 }
 
 // Close closes the Redis connection.

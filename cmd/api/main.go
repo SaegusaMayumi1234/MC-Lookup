@@ -75,10 +75,8 @@ func run(logger *slog.Logger) error {
 		cfg.Resolver.Strategy,
 		cfg.Resolver.NotFoundMinCount,
 		redisCache,
-		cfg.Cache.GetCacheTTL(),
 		cfg.Cache.Prefix,
-		cfg.Cache.IsNegativeCacheEnabled(),
-		cfg.Cache.GetNegativeCachePrefix(),
+		cfg.Cache.GetCacheTTL(),
 		cfg.Cache.GetNegativeTTL(),
 		logger,
 	)

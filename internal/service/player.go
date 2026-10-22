@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -30,18 +31,22 @@ type ResolveResult struct {
 }
 
 type PlayerService struct {
-	resolvers            []resolver.Resolver
-	strategy             string
-	notFoundMinCount     int
-	cache                cache.Cache
-	cacheTTL             time.Duration
-	cachePrefix          string
-	negativeCacheEnabled bool
-	negativeCachePrefix  string
-	negativeCacheTTL     time.Duration
-	sfGroup              singleflight.Group
-	inflightResolves     sync.WaitGroup
-	logger               *slog.Logger
+	resolvers        []resolver.Resolver
+	strategy         string
+	notFoundMinCount int
+	cache            cache.Cache
+	cachePrefix      string
+	cacheTTL         time.Duration
+	negativeCacheTTL time.Duration
+	sfGroup          singleflight.Group
+	inflightResolves sync.WaitGroup
+	logger           *slog.Logger
+}
+
+type PlayerCacheEntry struct {
+	UUID     string `json:"uuid"`
+	Username string `json:"username"`
+	Resolver string `json:"resolver"`
 }
 
 func NewPlayerService(
@@ -49,10 +54,8 @@ func NewPlayerService(
 	strategy string,
 	notFoundMinCount int,
 	c cache.Cache,
-	cacheTTL time.Duration,
 	cachePrefix string,
-	negativeCacheEnabled bool,
-	negativeCachePrefix string,
+	cacheTTL time.Duration,
 	negativeCacheTTL time.Duration,
 	logger *slog.Logger,
 ) *PlayerService {
@@ -63,16 +66,14 @@ func NewPlayerService(
 	}
 
 	return &PlayerService{
-		resolvers:            resolvers,
-		strategy:             strategy,
-		notFoundMinCount:     notFoundMinCount,
-		cache:                c,
-		cacheTTL:             cacheTTL,
-		cachePrefix:          cachePrefix,
-		negativeCacheEnabled: negativeCacheEnabled,
-		negativeCachePrefix:  negativeCachePrefix,
-		negativeCacheTTL:     negativeCacheTTL,
-		logger:               logger,
+		resolvers:        resolvers,
+		strategy:         strategy,
+		notFoundMinCount: notFoundMinCount,
+		cache:            c,
+		cacheTTL:         cacheTTL,
+		cachePrefix:      cachePrefix,
+		negativeCacheTTL: negativeCacheTTL,
+		logger:           logger,
 	}
 }
 
@@ -104,21 +105,14 @@ func (s *PlayerService) Resolve(ctx context.Context, identifier string) *Resolve
 
 	normalizedKey := model.NormalizeIdentifier(identifier)
 
-	if result := s.getCachedResult(normalizedKey); result != nil {
-		return result
-	}
-
-	if result := s.getCachedNotFound(normalizedKey); result != nil {
-		return result
+	if hit := s.getPlayerCache(normalizedKey); hit != nil {
+		return s.cachedResolveResult(hit)
 	}
 
 	resultCh := s.sfGroup.DoChan(normalizedKey, func() (any, error) {
 		resolveCtx := context.WithoutCancel(ctx)
-		if cached := s.getCachedResult(normalizedKey); cached != nil {
-			return cached, nil
-		}
-		if cached := s.getCachedNotFound(normalizedKey); cached != nil {
-			return cached, nil
+		if hit := s.getPlayerCache(normalizedKey); hit != nil {
+			return s.cachedResolveResult(hit), nil
 		}
 
 		result := s.doResolveTracked(resolveCtx, identifier)
@@ -226,11 +220,7 @@ func (s *PlayerService) doResolveRace(ctx context.Context, identifier string) *R
 
 			var resErr *resolver.ResolverError
 			if err != nil {
-				if re, ok := err.(*resolver.ResolverError); ok {
-					resErr = re
-				} else {
-					resErr = resolver.NewUpstreamError(res.Name(), 0, err)
-				}
+				resErr = wrapResolverError(res.Name(), err)
 			}
 
 			select {
@@ -282,7 +272,7 @@ func (s *PlayerService) doResolveFallback(ctx context.Context, identifier string
 
 func (s *PlayerService) newSuccessfulResolveResult(player *model.Player, resolverName string) *ResolveResult {
 	player.UUID = model.NormalizeUUID(player.UUID)
-	s.cachePlayer(player, resolverName)
+	s.setPlayerCache(player, resolverName)
 
 	return &ResolveResult{
 		Player:   player,
@@ -312,8 +302,8 @@ func (s *PlayerService) aggregateResolveErrors(identifier string, errors []*reso
 
 	aggErr := resolver.AggregateErrors(errors, s.notFoundMinCount)
 
-	if s.negativeCacheEnabled && s.negativeCacheTTL > 0 && aggErr.FinalCode == constant.CodeNotFound {
-		s.cache.SetNotFoundCache(s.negativeCachePrefix, identifier, s.negativeCacheTTL)
+	if aggErr.FinalCode == constant.CodeNotFound {
+		s.setPlayerNotFoundCache(identifier)
 	}
 
 	return &ResolveResult{
@@ -348,52 +338,106 @@ func buildErrorDetails(errors []*resolver.ResolverError) map[string]string {
 	return details
 }
 
-func (s *PlayerService) getCachedResult(key string) *ResolveResult {
-	entry, found := s.cache.GetPlayerCache(s.cachePrefix, key)
-	if !found {
-		return nil
+type playerCacheHit struct {
+	entry    *PlayerCacheEntry
+	cachedAt time.Time
+	ttl      time.Duration
+}
+
+func (s *PlayerService) cachedResolveResult(hit *playerCacheHit) *ResolveResult {
+	if hit.entry == nil {
+		return &ResolveResult{
+			Error: &resolver.ResolverError{
+				Code:       constant.CodeNotFound,
+				Message:    "Player not found (cached)",
+				StatusCode: http.StatusNotFound,
+			},
+			CacheHit: true,
+			CacheTTL: hit.ttl,
+			CacheAge: time.Since(hit.cachedAt),
+		}
 	}
 
 	return &ResolveResult{
 		Player: &model.Player{
-			UUID:     entry.Player.UUID,
-			Username: entry.Player.Username,
+			UUID:     hit.entry.UUID,
+			Username: hit.entry.Username,
 		},
-		Resolver: entry.Resolver,
+		Resolver: hit.entry.Resolver,
 		CacheHit: true,
-		CacheTTL: entry.TTL(),
-		CacheAge: entry.Age(),
+		CacheTTL: hit.ttl,
+		CacheAge: time.Since(hit.cachedAt),
 	}
 }
 
-// getCachedNotFound returns a cached not-found verdict, or nil on miss/when
-// negative caching is disabled.
-func (s *PlayerService) getCachedNotFound(key string) *ResolveResult {
-	if !s.negativeCacheEnabled {
+func (s *PlayerService) getPlayerCache(identifier string) *playerCacheHit {
+	if s.cacheTTL <= 0 && s.negativeCacheTTL <= 0 {
 		return nil
 	}
 
-	ttl, found := s.cache.GetNotFoundCache(s.negativeCachePrefix, key)
+	key := s.cachePrefix + model.NormalizeIdentifier(identifier)
+
+	raw, cachedAt, ttl, found, err := s.cache.GetCache(key)
+	if err != nil {
+		s.logger.Warn("player cache probe failed", "key", key, "error", err)
+		return nil
+	}
 	if !found {
 		return nil
 	}
 
-	return &ResolveResult{
-		Error: &resolver.ResolverError{
-			Code:       constant.CodeNotFound,
-			Message:    "Player not found (cached)",
-			StatusCode: http.StatusNotFound,
-		},
-		CacheHit: true,
-		CacheTTL: ttl,
+	// Negative verdicts are stored with a null payload.
+	if len(raw) == 0 || string(raw) == "null" {
+		if s.negativeCacheTTL <= 0 {
+			return nil
+		}
+		return &playerCacheHit{cachedAt: cachedAt, ttl: ttl}
+	}
+
+	if s.cacheTTL <= 0 {
+		return nil
+	}
+
+	var entry PlayerCacheEntry
+	if err := json.Unmarshal(raw, &entry); err != nil {
+		s.logger.Warn("corrupt player cache entry", "key", key, "error", err)
+		return nil
+	}
+
+	return &playerCacheHit{entry: &entry, cachedAt: cachedAt, ttl: ttl}
+}
+
+func (s *PlayerService) setPlayerCache(player *model.Player, resolverName string) {
+	if s.cacheTTL <= 0 {
+		return
+	}
+
+	cacheData := &PlayerCacheEntry{
+		UUID:     player.UUID,
+		Username: player.Username,
+		Resolver: resolverName,
+	}
+
+	keys := []string{
+		s.cachePrefix + model.NormalizeIdentifier(player.UUID),
+		s.cachePrefix + model.NormalizeIdentifier(player.Username),
+	}
+
+	if err := s.cache.SetCacheBulk(keys, cacheData, s.cacheTTL); err != nil {
+		s.logger.Warn("player cache write failed", "keys", keys, "error", err)
 	}
 }
 
-func (s *PlayerService) cachePlayer(player *model.Player, resolverName string) {
-	cacheData := &cache.PlayerData{
-		UUID:     player.UUID,
-		Username: player.Username,
+func (s *PlayerService) setPlayerNotFoundCache(identifier string) {
+	if s.negativeCacheTTL <= 0 {
+		return
 	}
 
-	s.cache.SetPlayerCache(s.cachePrefix, cacheData, resolverName, s.cacheTTL)
+	keys := []string{
+		s.cachePrefix + model.NormalizeIdentifier(identifier),
+	}
+
+	if err := s.cache.SetCacheBulk(keys, nil, s.negativeCacheTTL); err != nil {
+		s.logger.Warn("not-found cache write failed", "keys", keys, "error", err)
+	}
 }

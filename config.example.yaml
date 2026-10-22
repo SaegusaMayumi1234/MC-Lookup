@@ -26,8 +26,6 @@ resolver:
   not_found_min_count: 3
 
 cache:
-  ttl: 3600
   prefix: "mc-lookup:"
-  negative_enabled: true
+  ttl: 3600
   negative_ttl: 300
-  negative_prefix: "nf:"
