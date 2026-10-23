@@ -11,7 +11,7 @@ func validConfig() *Config {
 	return &Config{
 		App:   AppConfig{Name: "mc-lookup", Env: "dev"},
 		Api:   ApiConfig{Port: 8080, ReadTimeout: 5, WriteTimeout: 30, IdleTimeout: 60},
-		Redis: RedisConfig{Addr: "localhost:6379", Password: "", DB: 0, MaxRetries: -1},
+		Redis: RedisConfig{Addr: "localhost:6379", Password: "", DB: 0, MaxRetries: -1, OperationTimeout: 1},
 		Cache: CacheConfig{TTL: 3600, Prefix: "mc-lookup:", NegativeTTL: 300},
 		Resolver: ResolverConfig{
 			Timeout:          5,
@@ -99,6 +99,16 @@ func TestValidate(t *testing.T) {
 			name:    "max_retries below -1",
 			mutate:  func(c *Config) { c.Redis.MaxRetries = -2 },
 			wantErr: "redis.max_retries must be -1 or greater",
+		},
+		{
+			name:    "negative redis op_timeout",
+			mutate:  func(c *Config) { c.Redis.OperationTimeout = -1 },
+			wantErr: "redis.op_timeout must be greater than zero",
+		},
+		{
+			name:    "zero redis op_timeout",
+			mutate:  func(c *Config) { c.Redis.OperationTimeout = 0 },
+			wantErr: "redis.op_timeout must be greater than zero",
 		},
 		{
 			name:    "empty resolver list",
@@ -246,6 +256,13 @@ func TestWarnings(t *testing.T) {
 				c.Redis.MaxRetries = 10
 			},
 			wantWarning: "redis.max_retries (10) is high",
+		},
+		{
+			name: "high redis op_timeout",
+			mutate: func(c *Config) {
+				c.Redis.OperationTimeout = 10
+			},
+			wantWarning: "redis.op_timeout (10s) is high",
 		},
 	}
 

@@ -13,15 +13,21 @@ import (
 )
 
 type RedisConfig struct {
-	Addr       string
-	Password   string
-	DB         int
-	MaxRetries int
+	Addr             string
+	Password         string
+	DB               int
+	MaxRetries       int
+	OperationTimeout int
+}
+
+func (c *RedisConfig) GetOperationTimeout() time.Duration {
+	return time.Duration(c.OperationTimeout) * time.Second
 }
 
 type RedisClient struct {
-	client *redis.Client
-	logger *slog.Logger
+	client    *redis.Client
+	opTimeout time.Duration
+	logger    *slog.Logger
 }
 
 // redisEntry is the serialized form of a cache entry
@@ -43,14 +49,23 @@ func NewRedisClient(ctx context.Context, cfg RedisConfig, logger *slog.Logger) (
 		MaxRetries: cfg.MaxRetries,
 	})
 
-	if err := client.Ping(ctx).Err(); err != nil {
+	pingCtx, cancel := withOpTimeout(ctx, cfg.GetOperationTimeout())
+	defer cancel()
+
+	if err := client.Ping(pingCtx).Err(); err != nil {
 		return nil, fmt.Errorf("redis ping: %w", err)
 	}
 
-	return &RedisClient{client: client, logger: logger}, nil
+	return &RedisClient{client: client, opTimeout: cfg.GetOperationTimeout(), logger: logger}, nil
 }
 
-func (rc *RedisClient) SetCacheBulk(keys []string, data any, ttl time.Duration) error {
+// withOpTimeout bounds ctx with the configured op timeout.
+func withOpTimeout(ctx context.Context, opTimeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, opTimeout)
+}
+
+// SetCacheBulk writes one serialized entry under every key in one pipelined call.
+func (rc *RedisClient) SetCacheBulk(ctx context.Context, keys []string, data any, ttl time.Duration) error {
 	if len(keys) == 0 {
 		return nil
 	}
@@ -71,7 +86,9 @@ func (rc *RedisClient) SetCacheBulk(keys []string, data any, ttl time.Duration) 
 		return err
 	}
 
-	ctx := context.Background()
+	ctx, cancel := withOpTimeout(ctx, rc.opTimeout)
+	defer cancel()
+
 	_, err = rc.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 		for _, key := range keys {
 			pipe.Set(ctx, key, value, ttl)
@@ -82,11 +99,14 @@ func (rc *RedisClient) SetCacheBulk(keys []string, data any, ttl time.Duration) 
 	return err
 }
 
-func (rc *RedisClient) GetCache(key string) (data jsontext.Value, cachedAt time.Time, ttl time.Duration, found bool, err error) {
+// GetCache probes one key, returning the payload, cached-at stamp, and TTL.
+func (rc *RedisClient) GetCache(ctx context.Context, key string) (data jsontext.Value, cachedAt time.Time, ttl time.Duration, found bool, err error) {
 	var getCmd *redis.StringCmd
 	var ttlCmd *redis.DurationCmd
 
-	ctx := context.Background()
+	ctx, cancel := withOpTimeout(ctx, rc.opTimeout)
+	defer cancel()
+
 	_, err = rc.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 		getCmd = pipe.Get(ctx, key)
 		ttlCmd = pipe.TTL(ctx, key)

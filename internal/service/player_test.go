@@ -57,11 +57,11 @@ func (c *countingResolver) Name() string { return c.name }
 // nopCache is a no-op cache.Cache.
 type nopCache struct{}
 
-func (nopCache) SetCacheBulk(keys []string, data any, ttl time.Duration) error {
+func (nopCache) SetCacheBulk(context.Context, []string, any, time.Duration) error {
 	return nil
 }
 
-func (nopCache) GetCache(key string) (jsontext.Value, time.Time, time.Duration, bool, error) {
+func (nopCache) GetCache(context.Context, string) (jsontext.Value, time.Time, time.Duration, bool, error) {
 	return nil, time.Time{}, 0, false, nil
 }
 
@@ -219,7 +219,7 @@ type stubCache struct {
 	writes []stubWrite
 }
 
-func (s *stubCache) GetCache(key string) (jsontext.Value, time.Time, time.Duration, bool, error) {
+func (s *stubCache) GetCache(context.Context, string) (jsontext.Value, time.Time, time.Duration, bool, error) {
 	s.probes++
 	if s.raw == nil {
 		return nil, time.Time{}, 0, false, nil
@@ -227,7 +227,7 @@ func (s *stubCache) GetCache(key string) (jsontext.Value, time.Time, time.Durati
 	return jsontext.Value(s.raw), time.Now(), 30 * time.Second, true, nil
 }
 
-func (s *stubCache) SetCacheBulk(keys []string, data any, ttl time.Duration) error {
+func (s *stubCache) SetCacheBulk(_ context.Context, keys []string, data any, _ time.Duration) error {
 	s.writes = append(s.writes, stubWrite{keys: keys, data: data})
 	return nil
 }

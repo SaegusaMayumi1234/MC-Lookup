@@ -13,6 +13,7 @@ redis:
   password: ""
   db: 0
   max_retries: -1
+  op_timeout: 1
 
 resolver:
   timeout: 5

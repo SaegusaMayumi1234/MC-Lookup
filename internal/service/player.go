@@ -122,7 +122,7 @@ func (s *PlayerService) Resolve(ctx context.Context, identifier string) (*Resolv
 
 	key := model.NormalizeIdentifier(identifier)
 
-	if hit := s.getPlayerCache(key); hit != nil {
+	if hit := s.getPlayerCache(ctx, key); hit != nil {
 		return s.cachedOutcome(hit)
 	}
 
@@ -146,14 +146,16 @@ func (s *PlayerService) Resolve(ctx context.Context, identifier string) (*Resolv
 
 // flight is the singleflight closure: re-probe cache, then resolve detached.
 func (s *PlayerService) flight(key, identifier string, callerCtx context.Context) flightResult {
+	// Detach so the leader finishes and caches even if its caller leaves.
+	ctx := context.WithoutCancel(callerCtx)
+
 	// Re-probe so followers inherit a verdict the leader just cached.
-	if hit := s.getPlayerCache(key); hit != nil {
+	if hit := s.getPlayerCache(ctx, key); hit != nil {
 		result, err := s.cachedOutcome(hit)
 		return flightResult{result: result, err: err}
 	}
 
-	// Detach so the leader can finish and cache even if its caller leaves.
-	result, err := s.doResolveTracked(context.WithoutCancel(callerCtx), identifier)
+	result, err := s.doResolveTracked(ctx, identifier)
 	return flightResult{result: result, err: err}
 }
 
@@ -235,14 +237,14 @@ func (s *PlayerService) resolveRace(ctx context.Context, identifier string) (*Re
 	for res := range resultCh {
 		if res.err == nil && res.player != nil {
 			cancel() // abort stragglers
-			return s.freshResult(res.player, res.resolver), nil
+			return s.freshResult(ctx, res.player, res.resolver), nil
 		}
 		if res.err != nil {
 			resErrs = append(resErrs, res.err)
 		}
 	}
 
-	return s.failedResult(identifier, resErrs)
+	return s.failedResult(ctx, identifier, resErrs)
 }
 
 // resolveFallback tries resolvers in order; first success wins.
@@ -252,12 +254,12 @@ func (s *PlayerService) resolveFallback(ctx context.Context, identifier string) 
 	for _, res := range s.resolvers {
 		player, err := s.safeResolve(ctx, res, identifier)
 		if err == nil && player != nil {
-			return s.freshResult(player, res.Name()), nil
+			return s.freshResult(ctx, player, res.Name()), nil
 		}
 		resErrs = append(resErrs, wrapResolverError(res.Name(), err))
 	}
 
-	return s.failedResult(identifier, resErrs)
+	return s.failedResult(ctx, identifier, resErrs)
 }
 
 // safeResolve converts resolver panics into errors so they cannot escape singleflight.
@@ -287,9 +289,9 @@ func wrapResolverError(resolverName string, err error) *resolver.ResolverError {
 }
 
 // freshResult normalizes the player, caches it, and returns a fresh resolver result.
-func (s *PlayerService) freshResult(player *model.Player, resolverName string) *ResolveResult {
+func (s *PlayerService) freshResult(ctx context.Context, player *model.Player, resolverName string) *ResolveResult {
 	player.UUID = model.NormalizeUUID(player.UUID)
-	s.setPlayerCache(player, resolverName)
+	s.setPlayerCache(ctx, player, resolverName)
 
 	return &ResolveResult{
 		Player:   player,
@@ -299,13 +301,13 @@ func (s *PlayerService) freshResult(player *model.Player, resolverName string) *
 }
 
 // failedResult aggregates resolver errors; a conclusive not-found is negative-cached.
-func (s *PlayerService) failedResult(identifier string, resErrs []*resolver.ResolverError) (*ResolveResult, *Error) {
+func (s *PlayerService) failedResult(ctx context.Context, identifier string, resErrs []*resolver.ResolverError) (*ResolveResult, *Error) {
 	agg := resolver.AggregateErrors(resErrs, s.notFoundMinCount)
 
 	// 404 pairs a TTL-bearing stub with the error so handlers can set Cache-Control.
 	result := &ResolveResult{}
 	if agg.FinalCode == constant.CodeNotFound {
-		s.setPlayerNotFoundCache(identifier)
+		s.setPlayerNotFoundCache(ctx, identifier)
 		result.CacheTTL = s.negativeCacheTTL
 	}
 
@@ -366,14 +368,14 @@ func (s *PlayerService) cachedOutcome(hit *playerCacheHit) (*ResolveResult, *Err
 }
 
 // getPlayerCache probes the shared keyspace; nil means miss.
-func (s *PlayerService) getPlayerCache(key string) *playerCacheHit {
+func (s *PlayerService) getPlayerCache(ctx context.Context, key string) *playerCacheHit {
 	if s.cacheTTL <= 0 && s.negativeCacheTTL <= 0 {
 		return nil
 	}
 
 	cacheKey := s.cachePrefix + key
 
-	raw, _, ttl, found, err := s.cache.GetCache(cacheKey)
+	raw, _, ttl, found, err := s.cache.GetCache(ctx, cacheKey)
 	if err != nil {
 		s.logger.Warn("player cache probe failed", "key", cacheKey, "error", err)
 		return nil
@@ -403,8 +405,8 @@ func (s *PlayerService) getPlayerCache(key string) *playerCacheHit {
 	return &playerCacheHit{entry: &entry, ttl: ttl}
 }
 
-// setPlayerCache writes the player under both identifier keys.
-func (s *PlayerService) setPlayerCache(player *model.Player, resolverName string) {
+// setPlayerCache writes the player under both identifier keys; ctx must outlive the request.
+func (s *PlayerService) setPlayerCache(ctx context.Context, player *model.Player, resolverName string) {
 	if s.cacheTTL <= 0 {
 		return
 	}
@@ -420,20 +422,20 @@ func (s *PlayerService) setPlayerCache(player *model.Player, resolverName string
 		s.cachePrefix + model.NormalizeIdentifier(player.Username),
 	}
 
-	if err := s.cache.SetCacheBulk(keys, data, s.cacheTTL); err != nil {
+	if err := s.cache.SetCacheBulk(ctx, keys, data, s.cacheTTL); err != nil {
 		s.logger.Warn("player cache write failed", "keys", keys, "error", err)
 	}
 }
 
 // setPlayerNotFoundCache writes a null verdict under the identifier key.
-func (s *PlayerService) setPlayerNotFoundCache(identifier string) {
+func (s *PlayerService) setPlayerNotFoundCache(ctx context.Context, identifier string) {
 	if s.negativeCacheTTL <= 0 {
 		return
 	}
 
 	keys := []string{s.cachePrefix + model.NormalizeIdentifier(identifier)}
 
-	if err := s.cache.SetCacheBulk(keys, nil, s.negativeCacheTTL); err != nil {
+	if err := s.cache.SetCacheBulk(ctx, keys, nil, s.negativeCacheTTL); err != nil {
 		s.logger.Warn("not-found cache write failed", "keys", keys, "error", err)
 	}
 }
