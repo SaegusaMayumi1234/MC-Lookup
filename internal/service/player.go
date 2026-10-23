@@ -1,3 +1,4 @@
+// Package service implements player resolution.
 package service
 
 import (
@@ -8,7 +9,6 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
-	"strings"
 	"sync"
 	"time"
 
@@ -20,16 +20,31 @@ import (
 	"github.com/saegusamayumi1234/mc-lookup/internal/resolver"
 )
 
+// ResolveResult is the outcome of one player resolve.
 type ResolveResult struct {
 	Player    *model.Player
 	Resolver  string
 	CacheHit  bool
 	CacheTTL  time.Duration
-	CacheAge  time.Duration
 	Coalesced bool
-	Error     error
 }
 
+// newError converts a resolver error into the service error type.
+func newError(resErr *resolver.ResolverError) *Error {
+	if resErr == nil {
+		return nil
+	}
+
+	return &Error{
+		Code:       resErr.Code,
+		Message:    resErr.Message,
+		StatusCode: resErr.StatusCode,
+		Details:    resErr.Details,
+		Cause:      resErr,
+	}
+}
+
+// PlayerService resolves players through resolvers with caching and singleflight.
 type PlayerService struct {
 	resolvers        []resolver.Resolver
 	strategy         string
@@ -43,12 +58,14 @@ type PlayerService struct {
 	logger           *slog.Logger
 }
 
+// PlayerCacheEntry is the cached player payload.
 type PlayerCacheEntry struct {
 	UUID     string `json:"uuid"`
 	Username string `json:"username"`
 	Resolver string `json:"resolver"`
 }
 
+// NewPlayerService builds a PlayerService; strategy and resolvers are validated by config.
 func NewPlayerService(
 	resolvers []resolver.Resolver,
 	strategy string,
@@ -59,8 +76,6 @@ func NewPlayerService(
 	negativeCacheTTL time.Duration,
 	logger *slog.Logger,
 ) *PlayerService {
-	strategy = strings.ToLower(strings.TrimSpace(strategy))
-
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -77,8 +92,7 @@ func NewPlayerService(
 	}
 }
 
-// WaitInflightResolves blocks until all in-flight leader resolves have finished,
-// or until ctx is done.
+// WaitInflightResolves blocks until in-flight leader resolves finish or ctx is done.
 func (s *PlayerService) WaitInflightResolves(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {
@@ -94,123 +108,109 @@ func (s *PlayerService) WaitInflightResolves(ctx context.Context) error {
 	}
 }
 
-// Resolve attempts to resolve a player identifier using the configured strategy and resolvers.
-func (s *PlayerService) Resolve(ctx context.Context, identifier string) *ResolveResult {
+// flightResult boxes one resolve outcome for the singleflight leader and followers.
+type flightResult struct {
+	result *ResolveResult
+	err    *Error
+}
+
+// Resolve resolves a username or UUID, short-circuiting on cache hits.
+func (s *PlayerService) Resolve(ctx context.Context, identifier string) (*ResolveResult, *Error) {
 	if !model.IsValidIdentifier(identifier) {
-		// Service-level validation; no resolver is involved, so the error carries no resolver name.
-		return &ResolveResult{
-			Error: resolver.NewInvalidInputError("", identifier),
-		}
+		return nil, newError(resolver.NewInvalidInputError("", identifier))
 	}
 
-	normalizedKey := model.NormalizeIdentifier(identifier)
+	key := model.NormalizeIdentifier(identifier)
 
-	if hit := s.getPlayerCache(normalizedKey); hit != nil {
-		return s.cachedResolveResult(hit)
+	if hit := s.getPlayerCache(key); hit != nil {
+		return s.cachedOutcome(hit)
 	}
 
-	resultCh := s.sfGroup.DoChan(normalizedKey, func() (any, error) {
-		resolveCtx := context.WithoutCancel(ctx)
-		if hit := s.getPlayerCache(normalizedKey); hit != nil {
-			return s.cachedResolveResult(hit), nil
-		}
-
-		result := s.doResolveTracked(resolveCtx, identifier)
-
-		return result, nil
+	ch := s.sfGroup.DoChan(key, func() (any, error) {
+		return s.flight(key, identifier, ctx), nil
 	})
 
 	select {
+	case r := <-ch:
+		return s.unwrap(r)
 	case <-ctx.Done():
-		return &ResolveResult{Error: ctx.Err()}
-	case result := <-resultCh:
-		if result.Err != nil {
-			s.logger.Error("singleflight resolve failed", "error", result.Err)
-			return &ResolveResult{
-				Error: &resolver.ResolverError{
-					Code:       constant.CodeInternalServerError,
-					Message:    "Internal server error",
-					StatusCode: http.StatusInternalServerError,
-				},
-			}
+		// Prefer a ready shared result over a lost cancellation race.
+		select {
+		case r := <-ch:
+			return s.unwrap(r)
+		default:
+			return nil, newError(resolver.NewTimeoutError("", ctx.Err()))
 		}
-
-		res, ok := result.Val.(*ResolveResult)
-		if !ok {
-			s.logger.Error("unexpected singleflight result type", "value", result.Val)
-			return &ResolveResult{
-				Error: &resolver.ResolverError{
-					Code:       constant.CodeInternalServerError,
-					Message:    "Internal server error",
-					StatusCode: http.StatusInternalServerError,
-				},
-			}
-		}
-
-		callerResult := *res
-		if result.Shared && !callerResult.CacheHit {
-			callerResult.Coalesced = true
-		}
-		return &callerResult
 	}
 }
 
-// doResolveTracked runs doResolve while tracking it in inflightResolves for graceful shutdown; both Add and deferred Done live here.
-func (s *PlayerService) doResolveTracked(ctx context.Context, identifier string) *ResolveResult {
+// flight is the singleflight closure: re-probe cache, then resolve detached.
+func (s *PlayerService) flight(key, identifier string, callerCtx context.Context) flightResult {
+	// Re-probe so followers inherit a verdict the leader just cached.
+	if hit := s.getPlayerCache(key); hit != nil {
+		result, err := s.cachedOutcome(hit)
+		return flightResult{result: result, err: err}
+	}
+
+	// Detach so the leader can finish and cache even if its caller leaves.
+	result, err := s.doResolveTracked(context.WithoutCancel(callerCtx), identifier)
+	return flightResult{result: result, err: err}
+}
+
+// unwrap converts the shared flight result into the caller outcome.
+func (s *PlayerService) unwrap(r singleflight.Result) (*ResolveResult, *Error) {
+	fr, ok := r.Val.(flightResult)
+	if !ok {
+		s.logger.Error("unexpected singleflight result", "value", r.Val)
+		return nil, internalErrorResult()
+	}
+
+	if fr.err != nil {
+		return fr.result, fr.err
+	}
+
+	if fr.result == nil {
+		s.logger.Error("missing singleflight result", "value", r.Val)
+		return nil, internalErrorResult()
+	}
+
+	res := *fr.result
+	if r.Shared && !res.CacheHit {
+		res.Coalesced = true
+	}
+	return &res, nil
+}
+
+// doResolveTracked runs doResolve under the inflight counter for graceful shutdown.
+func (s *PlayerService) doResolveTracked(ctx context.Context, identifier string) (*ResolveResult, *Error) {
 	s.inflightResolves.Add(1)
 	defer s.inflightResolves.Done()
 	return s.doResolve(ctx, identifier)
 }
 
-// safeResolve calls res.Resolve and converts panics into errors; a panic escaping the singleflight closure crashes the process.
-func (s *PlayerService) safeResolve(ctx context.Context, res resolver.Resolver, identifier string) (p *model.Player, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			s.logger.Error("panic in resolver",
-				"resolver", res.Name(), "panic", r, "stack", string(debug.Stack()))
-			p = nil
-			err = fmt.Errorf("resolver panicked: %v", r)
-		}
-	}()
-
-	return res.Resolve(ctx, identifier)
+// doResolve dispatches to the configured strategy; config guarantees a known strategy.
+func (s *PlayerService) doResolve(ctx context.Context, identifier string) (*ResolveResult, *Error) {
+	if s.strategy == constant.StrategyRace {
+		return s.resolveRace(ctx, identifier)
+	}
+	return s.resolveFallback(ctx, identifier)
 }
 
-// doResolve dispatches player resolution to the configured strategy.
-func (s *PlayerService) doResolve(ctx context.Context, identifier string) *ResolveResult {
-	if len(s.resolvers) == 0 {
-		return noResolversResult()
-	}
-
-	switch s.strategy {
-	case constant.StrategyFallback:
-		return s.doResolveFallback(ctx, identifier)
-	case constant.StrategyRace:
-		return s.doResolveRace(ctx, identifier)
-	default:
-		return &ResolveResult{
-			Error: &resolver.ResolverError{
-				Code:       constant.CodeInternalServerError,
-				Message:    fmt.Sprintf("invalid strategy: %q", s.strategy),
-				StatusCode: http.StatusInternalServerError,
-			},
-		}
-	}
-}
-
-func (s *PlayerService) doResolveRace(ctx context.Context, identifier string) *ResolveResult {
+// resolveRace queries all resolvers concurrently; first success wins.
+func (s *PlayerService) resolveRace(ctx context.Context, identifier string) (*ResolveResult, *Error) {
 	resolveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	type result struct {
+	type attempt struct {
 		player   *model.Player
 		resolver string
 		err      *resolver.ResolverError
 	}
 
-	resultCh := make(chan result, len(s.resolvers))
-	var wg sync.WaitGroup
+	// Buffered to the resolver count, so sends never block.
+	resultCh := make(chan attempt, len(s.resolvers))
 
+	var wg sync.WaitGroup
 	for _, r := range s.resolvers {
 		wg.Add(1)
 		go func(res resolver.Resolver) {
@@ -223,113 +223,113 @@ func (s *PlayerService) doResolveRace(ctx context.Context, identifier string) *R
 				resErr = wrapResolverError(res.Name(), err)
 			}
 
-			select {
-			case resultCh <- result{player: p, resolver: res.Name(), err: resErr}:
-			case <-resolveCtx.Done():
-			}
+			resultCh <- attempt{player: p, resolver: res.Name(), err: resErr}
 		}(r)
 	}
-
-	// Close result channel when all goroutines complete
 	go func() {
 		wg.Wait()
 		close(resultCh)
 	}()
 
-	// Collect results
-	var errors []*resolver.ResolverError
-
+	resErrs := make([]*resolver.ResolverError, 0, len(s.resolvers))
 	for res := range resultCh {
 		if res.err == nil && res.player != nil {
-			cancel()
-
-			return s.newSuccessfulResolveResult(res.player, res.resolver)
+			cancel() // abort stragglers
+			return s.freshResult(res.player, res.resolver), nil
 		}
-
 		if res.err != nil {
-			errors = append(errors, res.err)
+			resErrs = append(resErrs, res.err)
 		}
 	}
 
-	return s.aggregateResolveErrors(identifier, errors)
+	return s.failedResult(identifier, resErrs)
 }
 
-func (s *PlayerService) doResolveFallback(ctx context.Context, identifier string) *ResolveResult {
-	errors := make([]*resolver.ResolverError, 0, len(s.resolvers))
+// resolveFallback tries resolvers in order; first success wins.
+func (s *PlayerService) resolveFallback(ctx context.Context, identifier string) (*ResolveResult, *Error) {
+	resErrs := make([]*resolver.ResolverError, 0, len(s.resolvers))
 
 	for _, res := range s.resolvers {
 		player, err := s.safeResolve(ctx, res, identifier)
-
 		if err == nil && player != nil {
-			return s.newSuccessfulResolveResult(player, res.Name())
+			return s.freshResult(player, res.Name()), nil
 		}
-
-		errors = append(errors, wrapResolverError(res.Name(), err))
+		resErrs = append(resErrs, wrapResolverError(res.Name(), err))
 	}
 
-	return s.aggregateResolveErrors(identifier, errors)
+	return s.failedResult(identifier, resErrs)
 }
 
-func (s *PlayerService) newSuccessfulResolveResult(player *model.Player, resolverName string) *ResolveResult {
+// safeResolve converts resolver panics into errors so they cannot escape singleflight.
+func (s *PlayerService) safeResolve(ctx context.Context, res resolver.Resolver, identifier string) (p *model.Player, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error("panic in resolver", "resolver", res.Name(), "panic", r, "stack", string(debug.Stack()))
+			p, err = nil, fmt.Errorf("resolver panicked: %v", r)
+		}
+	}()
+
+	return res.Resolve(ctx, identifier)
+}
+
+// wrapResolverError normalizes a failure into *ResolverError; errors.As preserves typed codes.
+func wrapResolverError(resolverName string, err error) *resolver.ResolverError {
+	if err == nil {
+		return resolver.NewUpstreamError(resolverName, 0, errors.New("resolver returned no player"))
+	}
+
+	var resErr *resolver.ResolverError
+	if errors.As(err, &resErr) {
+		return resErr
+	}
+
+	return resolver.NewUpstreamError(resolverName, 0, err)
+}
+
+// freshResult normalizes the player, caches it, and returns a fresh resolver result.
+func (s *PlayerService) freshResult(player *model.Player, resolverName string) *ResolveResult {
 	player.UUID = model.NormalizeUUID(player.UUID)
 	s.setPlayerCache(player, resolverName)
 
 	return &ResolveResult{
 		Player:   player,
 		Resolver: resolverName,
-		CacheHit: false,
-		CacheAge: 0,
 		CacheTTL: s.cacheTTL,
 	}
 }
 
-func wrapResolverError(resolverName string, err error) *resolver.ResolverError {
-	if err == nil {
-		return resolver.NewUpstreamError(resolverName, 0, errors.New("resolver returned no player"))
-	}
+// failedResult aggregates resolver errors; a conclusive not-found is negative-cached.
+func (s *PlayerService) failedResult(identifier string, resErrs []*resolver.ResolverError) (*ResolveResult, *Error) {
+	agg := resolver.AggregateErrors(resErrs, s.notFoundMinCount)
 
-	if re, ok := err.(*resolver.ResolverError); ok {
-		return re
-	}
-
-	return resolver.NewUpstreamError(resolverName, 0, err)
-}
-
-func (s *PlayerService) aggregateResolveErrors(identifier string, errors []*resolver.ResolverError) *ResolveResult {
-	if len(errors) == 0 {
-		return noResolversResult()
-	}
-
-	aggErr := resolver.AggregateErrors(errors, s.notFoundMinCount)
-
-	if aggErr.FinalCode == constant.CodeNotFound {
+	// 404 pairs a TTL-bearing stub with the error so handlers can set Cache-Control.
+	result := &ResolveResult{}
+	if agg.FinalCode == constant.CodeNotFound {
 		s.setPlayerNotFoundCache(identifier)
+		result.CacheTTL = s.negativeCacheTTL
 	}
 
-	return &ResolveResult{
-		Error: &resolver.ResolverError{
-			Code:       aggErr.FinalCode,
-			Message:    aggErr.FinalMessage,
-			StatusCode: aggErr.FinalStatus,
-			Details:    buildErrorDetails(errors),
-		},
-	}
-}
-
-func noResolversResult() *ResolveResult {
-	return &ResolveResult{
-		Error: &resolver.ResolverError{
-			Code:       constant.CodeNoResolversAvailable,
-			Message:    "No resolvers available",
-			StatusCode: http.StatusInternalServerError,
-		},
+	return result, &Error{
+		Code:       agg.FinalCode,
+		Message:    agg.FinalMessage,
+		StatusCode: agg.FinalStatus,
+		Details:    buildErrorDetails(resErrs),
 	}
 }
 
-func buildErrorDetails(errors []*resolver.ResolverError) map[string]string {
+// internalErrorResult is the fail-closed outcome for unexpected failures; details go to logs.
+func internalErrorResult() *Error {
+	return &Error{
+		Code:       constant.CodeInternalServerError,
+		Message:    "Internal server error",
+		StatusCode: http.StatusInternalServerError,
+	}
+}
+
+// buildErrorDetails maps resolver names to failure messages.
+func buildErrorDetails(resErrs []*resolver.ResolverError) map[string]string {
 	details := make(map[string]string)
-	for _, err := range errors {
-		// Skip empty resolver names so the JSON details map never gets a "" key.
+	for _, err := range resErrs {
 		if err.Resolver == "" {
 			continue
 		}
@@ -338,60 +338,56 @@ func buildErrorDetails(errors []*resolver.ResolverError) map[string]string {
 	return details
 }
 
+// playerCacheHit is one probe outcome; a nil entry is a not-found verdict.
 type playerCacheHit struct {
-	entry    *PlayerCacheEntry
-	cachedAt time.Time
-	ttl      time.Duration
+	entry *PlayerCacheEntry
+	ttl   time.Duration
 }
 
-func (s *PlayerService) cachedResolveResult(hit *playerCacheHit) *ResolveResult {
+// cachedOutcome converts a probe hit; a not-found verdict pairs a stub result with the 404 error.
+func (s *PlayerService) cachedOutcome(hit *playerCacheHit) (*ResolveResult, *Error) {
 	if hit.entry == nil {
 		return &ResolveResult{
-			Error: &resolver.ResolverError{
-				Code:       constant.CodeNotFound,
-				Message:    "Player not found (cached)",
-				StatusCode: http.StatusNotFound,
-			},
 			CacheHit: true,
 			CacheTTL: hit.ttl,
-			CacheAge: time.Since(hit.cachedAt),
+		}, &Error{
+			Code:       constant.CodeNotFound,
+			Message:    "Player not found (cached)",
+			StatusCode: http.StatusNotFound,
 		}
 	}
 
 	return &ResolveResult{
-		Player: &model.Player{
-			UUID:     hit.entry.UUID,
-			Username: hit.entry.Username,
-		},
+		Player:   &model.Player{UUID: hit.entry.UUID, Username: hit.entry.Username},
 		Resolver: hit.entry.Resolver,
 		CacheHit: true,
 		CacheTTL: hit.ttl,
-		CacheAge: time.Since(hit.cachedAt),
-	}
+	}, nil
 }
 
-func (s *PlayerService) getPlayerCache(identifier string) *playerCacheHit {
+// getPlayerCache probes the shared keyspace; nil means miss.
+func (s *PlayerService) getPlayerCache(key string) *playerCacheHit {
 	if s.cacheTTL <= 0 && s.negativeCacheTTL <= 0 {
 		return nil
 	}
 
-	key := s.cachePrefix + model.NormalizeIdentifier(identifier)
+	cacheKey := s.cachePrefix + key
 
-	raw, cachedAt, ttl, found, err := s.cache.GetCache(key)
+	raw, _, ttl, found, err := s.cache.GetCache(cacheKey)
 	if err != nil {
-		s.logger.Warn("player cache probe failed", "key", key, "error", err)
+		s.logger.Warn("player cache probe failed", "key", cacheKey, "error", err)
 		return nil
 	}
 	if !found {
 		return nil
 	}
 
-	// Negative verdicts are stored with a null payload.
+	// Negative verdicts are stored as a null payload.
 	if len(raw) == 0 || string(raw) == "null" {
 		if s.negativeCacheTTL <= 0 {
 			return nil
 		}
-		return &playerCacheHit{cachedAt: cachedAt, ttl: ttl}
+		return &playerCacheHit{ttl: ttl}
 	}
 
 	if s.cacheTTL <= 0 {
@@ -400,19 +396,20 @@ func (s *PlayerService) getPlayerCache(identifier string) *playerCacheHit {
 
 	var entry PlayerCacheEntry
 	if err := json.Unmarshal(raw, &entry); err != nil {
-		s.logger.Warn("corrupt player cache entry", "key", key, "error", err)
+		s.logger.Warn("corrupt player cache entry", "key", cacheKey, "error", err)
 		return nil
 	}
 
-	return &playerCacheHit{entry: &entry, cachedAt: cachedAt, ttl: ttl}
+	return &playerCacheHit{entry: &entry, ttl: ttl}
 }
 
+// setPlayerCache writes the player under both identifier keys.
 func (s *PlayerService) setPlayerCache(player *model.Player, resolverName string) {
 	if s.cacheTTL <= 0 {
 		return
 	}
 
-	cacheData := &PlayerCacheEntry{
+	data := &PlayerCacheEntry{
 		UUID:     player.UUID,
 		Username: player.Username,
 		Resolver: resolverName,
@@ -423,19 +420,18 @@ func (s *PlayerService) setPlayerCache(player *model.Player, resolverName string
 		s.cachePrefix + model.NormalizeIdentifier(player.Username),
 	}
 
-	if err := s.cache.SetCacheBulk(keys, cacheData, s.cacheTTL); err != nil {
+	if err := s.cache.SetCacheBulk(keys, data, s.cacheTTL); err != nil {
 		s.logger.Warn("player cache write failed", "keys", keys, "error", err)
 	}
 }
 
+// setPlayerNotFoundCache writes a null verdict under the identifier key.
 func (s *PlayerService) setPlayerNotFoundCache(identifier string) {
 	if s.negativeCacheTTL <= 0 {
 		return
 	}
 
-	keys := []string{
-		s.cachePrefix + model.NormalizeIdentifier(identifier),
-	}
+	keys := []string{s.cachePrefix + model.NormalizeIdentifier(identifier)}
 
 	if err := s.cache.SetCacheBulk(keys, nil, s.negativeCacheTTL); err != nil {
 		s.logger.Warn("not-found cache write failed", "keys", keys, "error", err)

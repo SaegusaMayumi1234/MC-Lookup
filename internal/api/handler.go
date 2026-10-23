@@ -9,60 +9,53 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/saegusamayumi1234/mc-lookup/internal/constant"
-	"github.com/saegusamayumi1234/mc-lookup/internal/resolver"
 	"github.com/saegusamayumi1234/mc-lookup/internal/service"
 )
 
 // PlayerHandler handles HTTP requests related to player resolution.
 type PlayerHandler struct {
 	service *service.PlayerService
-	logger  *slog.Logger
 }
 
-func NewPlayerHandler(logger *slog.Logger, service *service.PlayerService) *PlayerHandler {
+func NewPlayerHandler(service *service.PlayerService) *PlayerHandler {
 	return &PlayerHandler{
 		service: service,
-		logger:  logger,
 	}
 }
 
 func (h *PlayerHandler) GetPlayer(w http.ResponseWriter, r *http.Request) {
 	identifier := chi.URLParam(r, "identifier")
 
-	result := h.service.Resolve(r.Context(), identifier)
+	result, resErr := h.service.Resolve(r.Context(), identifier)
 	if r.Context().Err() != nil {
 		return
 	}
 
-	if result.Error != nil {
+	if result != nil {
 		if result.CacheHit {
-			maxAge := int64(result.CacheTTL / time.Second)
-			maxAge = max(maxAge, 0)
-			w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", maxAge))
 			w.Header().Set("X-Cache-Status", "HIT")
+		} else {
+			w.Header().Set("X-Cache-Status", "MISS")
 		}
-		h.writeError(w, result.Error)
+
+		if result.CacheTTL > 0 {
+			maxAge := max(int64(result.CacheTTL/time.Second), 0)
+			cacheControl := fmt.Sprintf("public, max-age=%d", maxAge)
+			w.Header().Set("Cache-Control", cacheControl)
+		}
+
+		if result.Resolver != "" {
+			w.Header().Set("X-Resolver", result.Resolver)
+		}
+
+		if result.Coalesced {
+			w.Header().Set("X-Coalesced", "true")
+		}
+	}
+
+	if resErr != nil {
+		h.writeError(w, resErr)
 		return
-	}
-
-	maxAge := int64(result.CacheTTL / time.Second)
-	maxAge = max(maxAge, 0)
-	cacheControl := fmt.Sprintf("public, max-age=%d", maxAge)
-	cacheStatus := "MISS"
-	if result.CacheHit {
-		cacheStatus = "HIT"
-	}
-
-	w.Header().Set("Cache-Control", cacheControl)
-	w.Header().Set("X-Cache-Status", cacheStatus)
-	w.Header().Set("X-Resolver", result.Resolver)
-
-	// Indicate that this request was part of a coalesced group: it either
-	// deduplicated against a concurrent in-flight lookup, or it was the
-	// leader that executed the shared lookup (singleflight broadcasts one
-	// shared result to all callers in the group).
-	if result.Coalesced {
-		w.Header().Set("X-Coalesced", "true")
 	}
 
 	h.writeJSON(w, http.StatusOK, PlayerResponse{
@@ -82,43 +75,25 @@ func (h *PlayerHandler) writeJSON(w http.ResponseWriter, status int, data any) {
 	json.MarshalWrite(w, data)
 }
 
-func (h *PlayerHandler) writeError(w http.ResponseWriter, err error) {
+func (h *PlayerHandler) writeError(w http.ResponseWriter, resErr *service.Error) {
 	errResp := ErrorResponse{
 		BaseResponse: BaseResponse{
 			Success: false,
 		},
-	}
-
-	if resErr, ok := err.(*resolver.ResolverError); ok {
-		errResp.Error = ErrorResult{
+		Error: ErrorResult{
 			Code:    resErr.Code,
 			Message: resErr.Message,
-		}
-
-		// Add resolver details if available
-		if len(resErr.Details) > 0 {
-			resolversTried := make([]string, 0, len(resErr.Details))
-			for name := range resErr.Details {
-				resolversTried = append(resolversTried, name)
-			}
-
-			errResp.Error.Details = &ErrorDetail{
-				Resolver: resErr.Details,
-			}
-		}
-
-		h.writeJSON(w, resErr.StatusCode, errResp)
-		return
+		},
 	}
 
-	h.logger.Error("internal error handled by generic branch", "error", err)
-
-	errResp.Error = ErrorResult{
-		Code:    constant.CodeInternalServerError,
-		Message: "Internal server error",
+	// Add resolver details if available
+	if len(resErr.Details) > 0 {
+		errResp.Error.Details = &ErrorDetail{
+			Resolver: resErr.Details,
+		}
 	}
 
-	h.writeJSON(w, http.StatusInternalServerError, errResp)
+	h.writeJSON(w, resErr.StatusCode, errResp)
 }
 
 // DocsHandler serves the embedded Swagger UI and OpenAPI spec.

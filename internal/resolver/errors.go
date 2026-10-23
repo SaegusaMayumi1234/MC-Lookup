@@ -1,7 +1,6 @@
 package resolver
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 
@@ -31,45 +30,8 @@ func (e *ResolverError) Unwrap() error {
 	return e.Cause
 }
 
-// Is checks if target error matches this error's code
-func (e *ResolverError) Is(target error) bool {
-	var t *ResolverError
-	if errors.As(target, &t) {
-		return e.Code == t.Code
-	}
-	return false
-}
-
-// Sentinel errors for comparison
-var (
-	ErrNotFound = &ResolverError{
-		Code:       constant.CodeNotFound,
-		StatusCode: http.StatusNotFound,
-	}
-
-	ErrRateLimited = &ResolverError{
-		Code:       constant.CodeRateLimited,
-		StatusCode: http.StatusTooManyRequests,
-	}
-
-	ErrUpstreamUnavailable = &ResolverError{
-		Code:       constant.CodeUpstreamError,
-		StatusCode: http.StatusBadGateway,
-	}
-
-	ErrTimeout = &ResolverError{
-		Code:       constant.CodeTimeout,
-		StatusCode: http.StatusGatewayTimeout,
-	}
-
-	ErrInvalidInput = &ResolverError{
-		Code:       constant.CodeInvalidInput,
-		StatusCode: http.StatusBadRequest,
-	}
-)
-
 // NewNotFoundError creates a not found error
-func NewNotFoundError(resolver, identifier string) *ResolverError {
+func NewNotFoundError(resolver string, identifier string) *ResolverError {
 	return &ResolverError{
 		Code:       constant.CodeNotFound,
 		Message:    fmt.Sprintf("Player '%s' not found", identifier),
@@ -89,11 +51,14 @@ func NewRateLimitError(resolver string, cause error) *ResolverError {
 	}
 }
 
-// NewUpstreamError creates an upstream error
 func NewUpstreamError(resolver string, statusCode int, cause error) *ResolverError {
+	message := fmt.Sprintf("Upstream API returned status %d", statusCode)
+	if statusCode <= 0 {
+		message = "Upstream request failed"
+	}
 	return &ResolverError{
 		Code:       constant.CodeUpstreamError,
-		Message:    fmt.Sprintf("Upstream API returned status %d", statusCode),
+		Message:    message,
 		StatusCode: http.StatusBadGateway,
 		Resolver:   resolver,
 		Cause:      cause,
@@ -139,7 +104,6 @@ func MapHTTPStatusToError(resolver string, statusCode int, identifier string) *R
 }
 
 type AggregatedError struct {
-	Errors       []*ResolverError
 	FinalCode    string
 	FinalStatus  int
 	FinalMessage string
@@ -166,9 +130,7 @@ func AggregateErrors(errs []*ResolverError, notFoundMinCount int) *AggregatedErr
 		codeCounts[err.Code]++
 	}
 
-	agg := &AggregatedError{
-		Errors: errs,
-	}
+	agg := &AggregatedError{}
 
 	// A configured NOT_FOUND quorum takes precedence over transient resolver errors.
 	// Unanimous NOT_FOUND remains conclusive even if the threshold is higher.

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
-	"errors"
 	"testing"
 	"time"
 
@@ -97,12 +96,12 @@ func TestRaceStrategyRecoversFromPanickingResolver(t *testing.T) {
 		constant.StrategyRace,
 	)
 
-	result := svc.Resolve(context.Background(), "Notch")
+	result, resErr := svc.Resolve(context.Background(), "Notch")
 
-	if result.Error != nil {
-		t.Fatalf("expected success from the healthy resolver, got error: %v", result.Error)
+	if resErr != nil {
+		t.Fatalf("expected success from the healthy resolver, got error: %v", resErr)
 	}
-	if result.Player == nil {
+	if result == nil || result.Player == nil {
 		t.Fatal("expected a player on success")
 	}
 	if result.Resolver != "good" {
@@ -119,16 +118,12 @@ func TestRaceStrategyAllResolversPanic(t *testing.T) {
 		constant.StrategyRace,
 	)
 
-	result := svc.Resolve(context.Background(), "Notch")
+	_, resErr := svc.Resolve(context.Background(), "Notch")
 
-	if result.Error == nil {
+	if resErr == nil {
 		t.Fatal("expected an aggregate error when every resolver panics")
 	}
 
-	var resErr *resolver.ResolverError
-	if !errors.As(result.Error, &resErr) {
-		t.Fatalf("expected a *resolver.ResolverError, got %T", result.Error)
-	}
 	if resErr.Code != constant.CodeUpstreamError {
 		t.Errorf("expected code %q, got %q", constant.CodeUpstreamError, resErr.Code)
 	}
@@ -146,7 +141,7 @@ func TestDoResolveTrackedReleasesCounterOnPanic(t *testing.T) {
 
 	func() {
 		defer func() { _ = recover() }() // the API layer's recovery middleware does this in production
-		_ = svc.doResolveTracked(context.Background(), "Notch")
+		_, _ = svc.doResolveTracked(context.Background(), "Notch")
 	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -168,12 +163,12 @@ func TestFallbackStrategyRecoversFromPanickingResolver(t *testing.T) {
 		constant.StrategyFallback,
 	)
 
-	result := svc.Resolve(context.Background(), "Notch")
+	result, resErr := svc.Resolve(context.Background(), "Notch")
 
-	if result.Error != nil {
-		t.Fatalf("expected success from the healthy resolver, got error: %v", result.Error)
+	if resErr != nil {
+		t.Fatalf("expected success from the healthy resolver, got error: %v", resErr)
 	}
-	if result.Player == nil {
+	if result == nil || result.Player == nil {
 		t.Fatal("expected a player on success")
 	}
 	if result.Resolver != "good" {
@@ -190,16 +185,12 @@ func TestFallbackStrategyAllResolversPanic(t *testing.T) {
 		constant.StrategyFallback,
 	)
 
-	result := svc.Resolve(context.Background(), "Notch")
+	_, resErr := svc.Resolve(context.Background(), "Notch")
 
-	if result.Error == nil {
+	if resErr == nil {
 		t.Fatal("expected an aggregate error when every resolver panics")
 	}
 
-	var resErr *resolver.ResolverError
-	if !errors.As(result.Error, &resErr) {
-		t.Fatalf("expected a *resolver.ResolverError, got %T", result.Error)
-	}
 	if resErr.Code != constant.CodeUpstreamError {
 		t.Errorf("expected code %q, got %q", constant.CodeUpstreamError, resErr.Code)
 	}
@@ -293,11 +284,10 @@ func TestNotFoundVerdictWrittenToPlayerKeyspace(t *testing.T) {
 		nil,
 	)
 
-	result := svc.Resolve(context.Background(), "Notch")
+	_, resErr := svc.Resolve(context.Background(), "Notch")
 
-	var resErr *resolver.ResolverError
-	if !errors.As(result.Error, &resErr) {
-		t.Fatalf("expected a *resolver.ResolverError, got %T", result.Error)
+	if resErr == nil {
+		t.Fatalf("expected the not-found verdict to surface as an error")
 	}
 	if resErr.Code != constant.CodeNotFound {
 		t.Errorf("expected code %q, got %q", constant.CodeNotFound, resErr.Code)
@@ -326,15 +316,21 @@ func TestCachedNotFoundShortCircuitsBeforeResolvers(t *testing.T) {
 		nil,
 	)
 
-	result := svc.Resolve(context.Background(), "Notch")
+	result, resErr := svc.Resolve(context.Background(), "Notch")
 
-	var resErr *resolver.ResolverError
-	if !errors.As(result.Error, &resErr) {
-		t.Fatalf("expected a *resolver.ResolverError, got %T", result.Error)
+	if resErr == nil {
+		t.Fatal("expected the cached not-found verdict to return an error")
 	}
 	if resErr.Code != constant.CodeNotFound {
 		t.Errorf("expected code %q, got %q", constant.CodeNotFound, resErr.Code)
 	}
+
+	// Contract check: a cached not-found verdict pairs a non-nil result
+	// stub (cache headers) with the typed error.
+	if result == nil || !result.CacheHit || result.Player != nil {
+		t.Errorf("expected a cache-header stub with the cached-404 error, got %+v", result)
+	}
+
 	if !result.CacheHit {
 		t.Error("expected the 404 to be a cache hit")
 	}
@@ -359,12 +355,12 @@ func TestNegativeDisabledIgnoresCachedVerdict(t *testing.T) {
 		nil,
 	)
 
-	result := svc.Resolve(context.Background(), "Notch")
+	result, resErr := svc.Resolve(context.Background(), "Notch")
 
-	if result.Error != nil {
-		t.Fatalf("expected the disabled negative cache to fall through to resolvers, got error: %v", result.Error)
+	if resErr != nil {
+		t.Fatalf("expected the disabled negative cache to fall through to resolvers, got error: %v", resErr)
 	}
-	if result.Player == nil {
+	if result == nil || result.Player == nil {
 		t.Fatal("expected a player on success")
 	}
 	if result.CacheHit {
@@ -388,10 +384,10 @@ func TestCachedPlayerShortCircuitsBeforeResolvers(t *testing.T) {
 		nil,
 	)
 
-	result := svc.Resolve(context.Background(), "notch")
+	result, resErr := svc.Resolve(context.Background(), "notch")
 
-	if result.Error != nil {
-		t.Fatalf("expected a positive cache hit, got error: %v", result.Error)
+	if resErr != nil {
+		t.Fatalf("expected a positive cache hit, got error: %v", resErr)
 	}
 	if !result.CacheHit {
 		t.Error("expected the player to be a cache hit")
@@ -423,12 +419,12 @@ func TestPositiveDisabledIgnoresCachedEntry(t *testing.T) {
 		nil,
 	)
 
-	result := svc.Resolve(context.Background(), "Notch")
+	result, resErr := svc.Resolve(context.Background(), "Notch")
 
-	if result.Error != nil {
-		t.Fatalf("expected the disabled player cache to fall through to resolvers, got error: %v", result.Error)
+	if resErr != nil {
+		t.Fatalf("expected the disabled player cache to fall through to resolvers, got error: %v", resErr)
 	}
-	if result.Player == nil {
+	if result == nil || result.Player == nil {
 		t.Fatal("expected a player on success")
 	}
 	if result.CacheHit {
@@ -452,10 +448,10 @@ func TestFullyDisabledCachingSkipsProbe(t *testing.T) {
 		nil,
 	)
 
-	result := svc.Resolve(context.Background(), "Notch")
+	result, resErr := svc.Resolve(context.Background(), "Notch")
 
-	if result.Error != nil {
-		t.Fatalf("expected a resolver result, got error: %v", result.Error)
+	if resErr != nil {
+		t.Fatalf("expected a resolver result, got error: %v", resErr)
 	}
 	if result.CacheHit {
 		t.Error("expected a resolver result, not a cache hit")
@@ -480,10 +476,10 @@ func TestPositiveDisabledSkipsPlayerWrite(t *testing.T) {
 		nil,
 	)
 
-	result := svc.Resolve(context.Background(), "Notch")
+	_, resErr := svc.Resolve(context.Background(), "Notch")
 
-	if result.Error != nil {
-		t.Fatalf("expected success, got error: %v", result.Error)
+	if resErr != nil {
+		t.Fatalf("expected success, got error: %v", resErr)
 	}
 	if c.playerWrites() != 0 {
 		t.Errorf("expected no player cache write with caching disabled, got %d", c.playerWrites())
