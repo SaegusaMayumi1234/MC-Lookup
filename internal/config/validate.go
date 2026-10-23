@@ -70,6 +70,9 @@ func (cfg *Config) Validate() error {
 	if cfg.Redis.MaxRetries < -1 {
 		return fmt.Errorf("redis.max_retries must be -1 or greater")
 	}
+	if err := validatePositiveSeconds("redis.op_timeout", cfg.Redis.OperationTimeout); err != nil {
+		return err
+	}
 
 	if len(cfg.Resolver.List) == 0 {
 		return fmt.Errorf("resolver list cannot be empty")
@@ -135,6 +138,10 @@ func (cfg *Config) Warnings() []string {
 	if cfg.Redis.MaxRetries > 5 {
 		add("redis.max_retries (%d) is high; requests may block for a long time during a Redis outage",
 			cfg.Redis.MaxRetries)
+	}
+	if cfg.Redis.OperationTimeout > 5 {
+		add("redis.op_timeout (%ds) is high; slow cache operations will hold requests open",
+			cfg.Redis.OperationTimeout)
 	}
 
 	return warnings

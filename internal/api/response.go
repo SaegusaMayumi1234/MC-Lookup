@@ -26,6 +26,5 @@ type ErrorResult struct {
 }
 
 type ErrorDetail struct {
-	Resolver   map[string]string `json:"resolver,omitempty"`
-	StackTrace string            `json:"stack_trace,omitempty"`
+	Resolver map[string]string `json:"resolver,omitempty"`
 }
