@@ -1,0 +1,18 @@
+# VCS
+.git
+.gitignore
+
+# Local artifacts
+main.exe
+*.exe
+state/
+
+# Docker / CI files themselves
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Docs not needed inside the image (docs/ IS needed — it embeds the Swagger assets)
+plan.md
+README.md
+LICENSE

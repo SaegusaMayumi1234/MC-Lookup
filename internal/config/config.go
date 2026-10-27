@@ -79,7 +79,7 @@ func Load() (*Config, error) {
 	v.SetDefault("api.idle_timeout", 60)
 	v.SetDefault("redis.op_timeout", 1)
 	v.SetDefault("resolver.strategy", constant.StrategyFallback)
-	v.SetDefault("resolver.not_found_min_count", 3)
+	v.SetDefault("resolver.not_found_min_count", 1)
 	v.SetDefault("cache.negative_ttl", 300)
 
 	v.AutomaticEnv()

@@ -2,27 +2,25 @@ openapi: 3.2.0
 info:
   title: Minecraft Player Lookup API
   description: |
-    A high-performance API for looking up Minecraft players by username or UUID.
+    A high-availability API for resolving Minecraft players by username or UUID,
+    backed by multiple third-party endpoints.
 
-    ## Features
-    - **Fast**: Queries multiple external APIs concurrently (race) or sequentially (fallback)
-    - **Cached**: Results are cached to reduce latency and external API calls
-    - **Reliable**: Aggregates errors across all resolvers before giving up
-    - **Coalescing**: Concurrent requests for the same identifier are deduplicated via singleflight
+    ## Behavior
+    - **Resolvers**: Mojang, PlayerDB, Ashcon, and Mowojang, run concurrently (`race`)
+      or sequentially (`fallback`), as configured server-side.
+    - **Caching**: results are cached in Redis; conclusive not-found verdicts are
+      negative-cached briefly and served without contacting upstreams.
+    - **Coalescing**: concurrent requests for the same identifier are deduplicated
+      via singleflight and share one upstream lookup.
+    - **CORS**: all origins allowed, methods `GET`/`OPTIONS`; the custom response
+      headers `X-Cache-Status`, `X-Resolver`, and `X-Coalesced` are exposed to browsers.
 
-    ## Resolvers
-    The API uses these external services:
-    - **Mojang** - Official Minecraft API
-    - **PlayerDB** - Community caching service
-    - **Ashcon** - Community API mirror
-    - **Mowojang** - High-performance Mojang mirror (no rate limits)
+    ## Errors
+    A NOT_FOUND quorum across resolvers takes precedence over rate-limit, timeout,
+    and upstream errors. Unknown paths return `404` with code `ENDPOINT_NOT_FOUND`,
+    non-GET methods on known paths return `405` with code `METHOD_NOT_ALLOWED`.
 
-    ## Response Headers
-    - `Cache-Control`: Standard HTTP cache directive, e.g. `public, max-age=300`
-    - `X-Cache-Status`: `HIT` or `MISS` — whether the result was served from cache
-    - `X-Resolver`: The resolver that sourced the data (present on both HIT and MISS)
-    - `X-Coalesced`: `true` if this request was part of a coalesced group — it shares one result with a concurrent in-flight lookup for the same identifier (deduplicated follower) **or** it was the request that executed that shared lookup (the group's leader)
-
+    The Swagger UI and this spec are served only when the server runs with `app.env: dev`.
   version: 1.0.0
   contact:
     name: API Support
@@ -44,7 +42,8 @@ paths:
         - Provide a **username** (3–16 alphanumeric/underscore characters) to get the UUID
         - Provide a **UUID** (with or without dashes) to get the current username
 
-        Results are cached. Concurrent requests for the same identifier are automatically coalesced.
+        Lookups are case-insensitive. Results are cached; concurrent requests for the
+        same identifier are automatically coalesced.
       operationId: getPlayer
       tags:
         - Player
@@ -72,7 +71,7 @@ paths:
             Cache-Control:
               schema:
                 type: string
-              description: Standard HTTP cache directive, e.g. `public, max-age=300`
+              description: Standard HTTP cache directive, e.g. `public, max-age=300`. Absent when player caching is disabled.
             X-Cache-Status:
               schema:
                 type: string
@@ -113,9 +112,27 @@ paths:
                   message: "Invalid identifier 'a': must be a valid Minecraft username (3-16 chars) or UUID"
         '404':
           description: >
-            The configured minimum NOT_FOUND count was reached; the response message reports how many resolvers confirmed it.
-            Conclusive not-found verdicts are cached briefly (cache.negative_ttl) and served without contacting upstreams;
-            cached responses carry a Cache-Control header and X-Cache-Status: HIT, with the message "Player not found (cached)".
+            The configured NOT_FOUND quorum (resolver.not_found_min_count) was reached, or every consulted
+            resolver reported not found. Resolution stops as soon as the quorum reports NOT_FOUND and any
+            in-flight lookups are cancelled. Conclusive not-found verdicts are negative-cached briefly
+            (cache.negative_ttl) and served without contacting upstreams. The message is always
+            "Player not found"; a cached verdict is indicated by X-Cache-Status: HIT.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              description: '`public, max-age=<seconds>` with the remaining negative-cache TTL. Absent when negative caching is disabled.'
+            X-Cache-Status:
+              schema:
+                type: string
+                enum: [HIT, MISS]
+              description: '`HIT` for a cached not-found verdict, `MISS` for a fresh one.'
+            X-Resolver:
+              schema:
+                type: string
+              description: >
+                Comma-separated resolvers that reported NOT_FOUND, e.g. `mojang,playerdb,ashcon`.
+                Present on fresh and cached verdicts; cached responses carry the stored list.
           content:
             application/json:
               schema:
@@ -124,14 +141,23 @@ paths:
                 success: false
                 error:
                   code: "NOT_FOUND"
-                  message: "Player not found by 3 of 4 resolvers"
-                  details:
-                    resolver:
-                      mojang: "Player 'NonExistent' not found"
-                      playerdb: "Player 'NonExistent' not found"
-                      ashcon: "Player 'NonExistent' not found"
+                  message: "Player not found"
+        '405':
+          description: Method not allowed — only GET is supported on this path
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                success: false
+                error:
+                  code: "METHOD_NOT_ALLOWED"
+                  message: "Method Not Allowed"
         '429':
-          description: Rate-limit failures occurred and the configured NOT_FOUND quorum was not reached; the message reports how many resolvers were rate-limited.
+          description: >
+            Rate-limit failures occurred and the configured NOT_FOUND quorum was not reached.
+            The message reports how many resolvers were affected, e.g. "Rate limiting affected
+            1 of 4 resolvers" (or "affected all 4 resolvers").
           content:
             application/json:
               schema:
@@ -142,7 +168,7 @@ paths:
                   code: "RATE_LIMITED"
                   message: "Rate limiting affected 1 of 4 resolvers"
         '500':
-          description: Internal server error — misconfiguration or unexpected failure
+          description: Internal server error — misconfiguration or unexpected failure (including recovered panics)
           content:
             application/json:
               schema:
@@ -154,7 +180,7 @@ paths:
                     success: false
                     error:
                       code: "INTERNAL_SERVER_ERROR"
-                      message: "An unexpected error occurred"
+                      message: "Internal server error"
                 no_resolvers:
                   summary: No resolvers configured
                   value:
@@ -173,12 +199,11 @@ paths:
                 error:
                   code: "UPSTREAM_ERROR"
                   message: "All resolver attempts failed"
-                  details:
-                    resolver:
-                      mojang: "Upstream API returned status 503"
-                      playerdb: "Upstream API returned status 503"
         '504':
-          description: Resolver timeouts occurred, no rate limit took precedence, and the configured NOT_FOUND quorum was not reached.
+          description: >
+            Resolver timeouts occurred, no rate limit took precedence, and the configured NOT_FOUND
+            quorum was not reached. The message reports how many resolvers were affected,
+            e.g. "Timeouts affected 1 of 4 resolvers" (or "affected all 4 resolvers").
           content:
             application/json:
               schema:
@@ -246,6 +271,8 @@ components:
           enum:
             - INVALID_INPUT
             - NOT_FOUND
+            - ENDPOINT_NOT_FOUND
+            - METHOD_NOT_ALLOWED
             - RATE_LIMITED
             - UPSTREAM_ERROR
             - TIMEOUT
@@ -255,23 +282,6 @@ components:
         message:
           type: string
           description: Human-readable error message
-        details:
-          $ref: '#/components/schemas/ErrorDetail'
-
-    ErrorDetail:
-      type: object
-      description: Additional context about resolver-level failures
-      properties:
-        resolver:
-          type: object
-          description: Per-resolver error messages, keyed by resolver name
-          additionalProperties:
-            type: string
-          example:
-            mojang: "Player 'NonExistent' not found"
-            playerdb: "Player 'NonExistent' not found"
-            ashcon: "Player 'NonExistent' not found"
-            mowojang: "Player 'NonExistent' not found"
 
 tags:
   - name: Player

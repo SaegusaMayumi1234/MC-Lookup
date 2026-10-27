@@ -24,7 +24,7 @@ resolver:
     - playerdb
     - ashcon
     - mowojang
-  not_found_min_count: 3
+  not_found_min_count: 1
 
 cache:
   prefix: "mc-lookup:"
