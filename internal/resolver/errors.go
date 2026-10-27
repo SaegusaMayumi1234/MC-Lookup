@@ -138,7 +138,7 @@ func AggregateErrors(errs []*ResolverError, notFoundMinCount int) *AggregatedErr
 	if notFoundCount == len(errs) || (notFoundMinCount > 0 && notFoundCount >= notFoundMinCount) {
 		agg.FinalCode = constant.CodeNotFound
 		agg.FinalStatus = http.StatusNotFound
-		agg.FinalMessage = fmt.Sprintf("Player not found by %d of %d resolvers", notFoundCount, len(errs))
+		agg.FinalMessage = "Player not found"
 		return agg
 	}
 

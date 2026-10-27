@@ -86,13 +86,6 @@ func (h *PlayerHandler) writeError(w http.ResponseWriter, resErr *service.Error)
 		},
 	}
 
-	// Add resolver details if available
-	if len(resErr.Details) > 0 {
-		errResp.Error.Details = &ErrorDetail{
-			Resolver: resErr.Details,
-		}
-	}
-
 	h.writeJSON(w, resErr.StatusCode, errResp)
 }
 

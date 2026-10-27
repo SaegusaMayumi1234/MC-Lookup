@@ -9,7 +9,6 @@ type Error struct {
 	Code       string
 	Message    string
 	StatusCode int
-	Details    map[string]string
 	Cause      error
 }
 

@@ -20,11 +20,6 @@ type ErrorResponse struct {
 }
 
 type ErrorResult struct {
-	Code    string       `json:"code"`
-	Message string       `json:"message"`
-	Details *ErrorDetail `json:"details,omitempty"`
-}
-
-type ErrorDetail struct {
-	Resolver map[string]string `json:"resolver,omitempty"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -127,12 +129,10 @@ func TestRaceStrategyAllResolversPanic(t *testing.T) {
 	if resErr.Code != constant.CodeUpstreamError {
 		t.Errorf("expected code %q, got %q", constant.CodeUpstreamError, resErr.Code)
 	}
-	// Both panicking resolvers must appear as ordinary failed results —
-	// proof that their panics were converted into errors, not crashes.
-	for _, name := range []string{"boom-a", "boom-b"} {
-		if _, ok := resErr.Details[name]; !ok {
-			t.Errorf("expected details entry for resolver %q, got %v", name, resErr.Details)
-		}
+	// Both panicking resolvers must have been consulted — proof that their
+	// panics were converted into errors, not crashes.
+	if resErr.Message != "All resolver attempts failed" {
+		t.Errorf("expected the all-failed aggregate message, got %q", resErr.Message)
 	}
 }
 
@@ -194,15 +194,13 @@ func TestFallbackStrategyAllResolversPanic(t *testing.T) {
 	if resErr.Code != constant.CodeUpstreamError {
 		t.Errorf("expected code %q, got %q", constant.CodeUpstreamError, resErr.Code)
 	}
-	for _, name := range []string{"boom-a", "boom-b"} {
-		if _, ok := resErr.Details[name]; !ok {
-			t.Errorf("expected details entry for resolver %q, got %v", name, resErr.Details)
-		}
+	if resErr.Message != "All resolver attempts failed" {
+		t.Errorf("expected the all-failed aggregate message, got %q", resErr.Message)
 	}
 }
 
-// stubWrite records one SetCacheBulk call for assertions. A nil payload is a
-// not-found verdict, a non-nil one is a player entry.
+// stubWrite records one SetCacheBulk call for assertions. A nil Player inside
+// the entry is a not-found verdict, a non-nil one is a player entry.
 type stubWrite struct {
 	keys []string
 	data any
@@ -232,22 +230,22 @@ func (s *stubCache) SetCacheBulk(_ context.Context, keys []string, data any, _ t
 	return nil
 }
 
-// playerWrites counts player-entry writes (non-nil payloads).
+// playerWrites counts player-entry writes (non-nil player payload).
 func (s *stubCache) playerWrites() int {
 	n := 0
 	for _, w := range s.writes {
-		if w.data != nil {
+		if e, ok := w.data.(*PlayerCacheEntry); ok && e.Player != nil {
 			n++
 		}
 	}
 	return n
 }
 
-// notFoundWrites counts not-found verdict writes (nil payloads).
+// notFoundWrites counts not-found verdict writes (nil player payload).
 func (s *stubCache) notFoundWrites() int {
 	n := 0
 	for _, w := range s.writes {
-		if w.data == nil {
+		if e, ok := w.data.(*PlayerCacheEntry); ok && e.Player == nil {
 			n++
 		}
 	}
@@ -258,8 +256,7 @@ func (s *stubCache) notFoundWrites() int {
 func cachedPlayerJSON(t *testing.T) []byte {
 	t.Helper()
 	raw, err := json.Marshal(&PlayerCacheEntry{
-		UUID:     "069a79f4-44e9-4726-a91b-ef990e6b5624",
-		Username: "notch",
+		Player:   &model.Player{UUID: dashedTestUUID, Username: "notch"},
 		Resolver: "stored",
 	})
 	if err != nil {
@@ -326,9 +323,13 @@ func TestCachedNotFoundShortCircuitsBeforeResolvers(t *testing.T) {
 	}
 
 	// Contract check: a cached not-found verdict pairs a non-nil result
-	// stub (cache headers) with the typed error.
+	// stub (cache headers) with the typed error. A bare null payload carries
+	// no reporter list, so Resolver stays empty.
 	if result == nil || !result.CacheHit || result.Player != nil {
 		t.Errorf("expected a cache-header stub with the cached-404 error, got %+v", result)
+	}
+	if result != nil && result.Resolver != "" {
+		t.Errorf("expected no reporter list from a bare null payload, got %q", result.Resolver)
 	}
 
 	if !result.CacheHit {
@@ -549,8 +550,8 @@ func TestMalformedResolverIsSkippedInRace(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected a *PlayerCacheEntry write, got %T", c.writes[0].data)
 	}
-	if written.UUID != dashedTestUUID {
-		t.Errorf("expected the normalized UUID to be cached, got %q", written.UUID)
+	if written.Player == nil || written.Player.UUID != dashedTestUUID {
+		t.Errorf("expected the normalized UUID to be cached, got %+v", written.Player)
 	}
 }
 
@@ -592,8 +593,8 @@ func TestMalformedResolverIsSkippedInFallback(t *testing.T) {
 	}
 }
 
-// When no resolver produces a valid record, the outcome is UPSTREAM_ERROR with
-// per-resolver detail, and nothing is written to the cache.
+// When no resolver produces a valid record, the outcome is UPSTREAM_ERROR, and
+// nothing is written to the cache.
 func TestAllMalformedResolversAggregateAsUpstreamError(t *testing.T) {
 	c := &stubCache{}
 	svc := newTestService(
@@ -611,11 +612,6 @@ func TestAllMalformedResolversAggregateAsUpstreamError(t *testing.T) {
 	}
 	if resErr.Code != constant.CodeUpstreamError {
 		t.Errorf("expected code %q, got %q", constant.CodeUpstreamError, resErr.Code)
-	}
-	for _, name := range []string{"empty-fields", "garbage-uuid"} {
-		if _, ok := resErr.Details[name]; !ok {
-			t.Errorf("expected details entry for resolver %q, got %v", name, resErr.Details)
-		}
 	}
 	if c.playerWrites() != 0 {
 		t.Errorf("expected no player cache write, got %d", c.playerWrites())
@@ -672,9 +668,6 @@ func TestUUIDLookupRejectsMismatchedUUID(t *testing.T) {
 	}
 	if resErr.Code != constant.CodeUpstreamError {
 		t.Errorf("expected code %q, got %q", constant.CodeUpstreamError, resErr.Code)
-	}
-	if _, ok := resErr.Details["mismatched"]; !ok {
-		t.Errorf("expected details entry for resolver \"mismatched\", got %v", resErr.Details)
 	}
 	if c.playerWrites() != 0 {
 		t.Errorf("expected no player cache write, got %d", c.playerWrites())
@@ -743,9 +736,10 @@ func TestUsernameLookupDoesNotCrossCheckName(t *testing.T) {
 
 // A cache entry that parses but violates the player shape must be treated as
 // a miss: resolution falls through to the resolvers and repairs the keyspace
-// with a valid write.
+// with a valid write. A corrupt positive must never degrade into a negative
+// verdict.
 func TestCorruptCacheEntryShapeIgnored(t *testing.T) {
-	c := &stubCache{raw: []byte(`{"uuid":"069a79f4-44e9-4726-a91b-ef990e6b5624","username":"","resolver":"stored"}`)}
+	c := &stubCache{raw: []byte(`{"player":{"uuid":"069a79f4-44e9-4726-a91b-ef990e6b5624","username":""},"resolver":"stored"}`)}
 	svc := NewPlayerService(
 		[]resolver.Resolver{cannedNotch("good")},
 		constant.StrategyFallback,
@@ -770,5 +764,231 @@ func TestCorruptCacheEntryShapeIgnored(t *testing.T) {
 	}
 	if c.playerWrites() != 1 {
 		t.Errorf("expected the re-resolve to overwrite the corrupt entry, got %d writes", c.playerWrites())
+	}
+}
+
+// rateLimitedResolver always reports RATE_LIMITED.
+type rateLimitedResolver struct{ name string }
+
+func (r rateLimitedResolver) Resolve(ctx context.Context, identifier string) (*model.Player, error) {
+	return nil, resolver.NewRateLimitError(r.name, nil)
+}
+
+func (r rateLimitedResolver) Name() string { return r.name }
+
+// blockingResolver blocks until its context is cancelled, then records that it
+// observed the cancellation.
+type blockingResolver struct {
+	name      string
+	cancelled chan struct{}
+}
+
+func (b *blockingResolver) Resolve(ctx context.Context, identifier string) (*model.Player, error) {
+	<-ctx.Done()
+	close(b.cancelled)
+	return nil, resolver.NewTimeoutError(b.name, ctx.Err())
+}
+
+func (b *blockingResolver) Name() string { return b.name }
+
+// In race mode, once the NOT_FOUND quorum reports, the verdict is conclusive:
+// resolution must return immediately and cancel the stragglers instead of
+// waiting for every resolver to finish.
+func TestRaceFastReturnOnNotFoundQuorum(t *testing.T) {
+	blocked := &blockingResolver{name: "blocked", cancelled: make(chan struct{})}
+	svc := NewPlayerService(
+		[]resolver.Resolver{
+			notFoundResolver{name: "nf-a"},
+			notFoundResolver{name: "nf-b"},
+			blocked,
+		},
+		constant.StrategyRace,
+		2,
+		nopCache{},
+		"test:",
+		time.Minute,
+		time.Minute,
+		nil,
+	)
+
+	result, resErr := svc.Resolve(context.Background(), "Notch")
+
+	if resErr == nil || resErr.Code != constant.CodeNotFound {
+		t.Fatalf("expected a NOT_FOUND verdict once the quorum reported it, got %v", resErr)
+	}
+	if resErr.Message != "Player not found" {
+		t.Errorf("expected the generic not-found message, got %q", resErr.Message)
+	}
+	if result == nil {
+		t.Fatal("expected a result stub with the error")
+	}
+	// Race arrival order is non-deterministic, so compare as a set.
+	reporters := strings.Split(result.Resolver, ",")
+	sort.Strings(reporters)
+	if len(reporters) != 2 || reporters[0] != "nf-a" || reporters[1] != "nf-b" {
+		t.Errorf("expected the not-found reporters in Resolver, got %q", result.Resolver)
+	}
+
+	select {
+	case <-blocked.cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected the blocking resolver to be cancelled after the quorum was reached")
+	}
+}
+
+// A single NOT_FOUND below the quorum must not decide the race: the healthy
+// resolver still wins.
+func TestRaceWaitsForSuccessWhenQuorumNotReached(t *testing.T) {
+	svc := NewPlayerService(
+		[]resolver.Resolver{
+			notFoundResolver{name: "nf-a"},
+			rateLimitedResolver{name: "rl"},
+			okResolver{name: "good"},
+		},
+		constant.StrategyRace,
+		2,
+		nopCache{},
+		"test:",
+		time.Minute,
+		time.Minute,
+		nil,
+	)
+
+	result, resErr := svc.Resolve(context.Background(), "Notch")
+
+	if resErr != nil {
+		t.Fatalf("expected the healthy resolver to win below the quorum, got error: %v", resErr)
+	}
+	if result.Resolver != "good" {
+		t.Errorf("expected resolver %q, got %q", "good", result.Resolver)
+	}
+}
+
+// In fallback mode, reaching the NOT_FOUND quorum must stop the walk: the
+// resolvers after the quorum are never consulted.
+func TestFallbackStopsAtNotFoundQuorum(t *testing.T) {
+	counted := &countingResolver{name: "counted"}
+	svc := NewPlayerService(
+		[]resolver.Resolver{
+			notFoundResolver{name: "nf-a"},
+			notFoundResolver{name: "nf-b"},
+			counted,
+			okResolver{name: "good"},
+		},
+		constant.StrategyFallback,
+		2,
+		nopCache{},
+		"test:",
+		time.Minute,
+		time.Minute,
+		nil,
+	)
+
+	result, resErr := svc.Resolve(context.Background(), "Notch")
+
+	if resErr == nil || resErr.Code != constant.CodeNotFound {
+		t.Fatalf("expected a NOT_FOUND verdict once the quorum reported it, got %v", resErr)
+	}
+	if result == nil || result.Resolver != "nf-a,nf-b" {
+		t.Errorf("expected the not-found reporters in Resolver, got %+v", result)
+	}
+	if counted.calls != 0 {
+		t.Errorf("expected fallback to stop at the quorum, got %d later resolver calls", counted.calls)
+	}
+}
+
+// Below the quorum, fallback must keep walking: a NOT_FOUND followed by other
+// failures must not prevent the later success.
+func TestFallbackContinuesWhenQuorumNotReached(t *testing.T) {
+	svc := NewPlayerService(
+		[]resolver.Resolver{
+			notFoundResolver{name: "nf-a"},
+			rateLimitedResolver{name: "rl"},
+			okResolver{name: "good"},
+		},
+		constant.StrategyFallback,
+		2,
+		nopCache{},
+		"test:",
+		time.Minute,
+		time.Minute,
+		nil,
+	)
+
+	result, resErr := svc.Resolve(context.Background(), "Notch")
+
+	if resErr != nil {
+		t.Fatalf("expected fallback to reach the healthy resolver below the quorum, got error: %v", resErr)
+	}
+	if result.Resolver != "good" {
+		t.Errorf("expected resolver %q, got %q", "good", result.Resolver)
+	}
+}
+
+// A conclusive not-found verdict carries the comma-joined reporter list in the
+// result stub and in the negative cache entry (for the cached-404 header).
+func TestNotFoundVerdictCachesReporterList(t *testing.T) {
+	c := &stubCache{}
+	svc := NewPlayerService(
+		[]resolver.Resolver{
+			notFoundResolver{name: "mojang"},
+			notFoundResolver{name: "playerdb"},
+		},
+		constant.StrategyFallback,
+		2,
+		c,
+		"test:",
+		time.Minute,
+		time.Minute,
+		nil,
+	)
+
+	result, resErr := svc.Resolve(context.Background(), "Notch")
+
+	if resErr == nil || resErr.Code != constant.CodeNotFound {
+		t.Fatalf("expected a NOT_FOUND verdict, got %v", resErr)
+	}
+	if result == nil || result.Resolver != "mojang,playerdb" {
+		t.Errorf("expected the not-found reporters in Resolver, got %+v", result)
+	}
+
+	written, ok := c.writes[0].data.(*PlayerCacheEntry)
+	if !ok {
+		t.Fatalf("expected a *PlayerCacheEntry write, got %T", c.writes[0].data)
+	}
+	if written.Player != nil {
+		t.Errorf("expected a nil player payload on the negative verdict, got %+v", written.Player)
+	}
+	if written.Resolver != "mojang,playerdb" {
+		t.Errorf("expected the reporter list to be cached, got %q", written.Resolver)
+	}
+}
+
+// A cached negative verdict stores the reporter list, so cached 404s can set
+// the X-Resolver header too.
+func TestCachedNotFoundCarriesReporterList(t *testing.T) {
+	upstream := &countingResolver{name: "counted"}
+	c := &stubCache{raw: []byte(`{"player":null,"resolver":"mojang,playerdb"}`)}
+	svc := NewPlayerService(
+		[]resolver.Resolver{upstream},
+		constant.StrategyFallback,
+		1,
+		c,
+		"test:",
+		time.Minute,
+		time.Minute,
+		nil,
+	)
+
+	result, resErr := svc.Resolve(context.Background(), "Notch")
+
+	if resErr == nil || resErr.Code != constant.CodeNotFound {
+		t.Fatalf("expected the cached not-found verdict to return an error, got %v", resErr)
+	}
+	if result == nil || result.Resolver != "mojang,playerdb" {
+		t.Errorf("expected the cached reporter list in Resolver, got %+v", result)
+	}
+	if upstream.calls != 0 {
+		t.Errorf("expected resolvers to be short-circuited, got %d calls", upstream.calls)
 	}
 }

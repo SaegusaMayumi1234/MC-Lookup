@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,7 +40,6 @@ func newError(resErr *resolver.ResolverError) *Error {
 		Code:       resErr.Code,
 		Message:    resErr.Message,
 		StatusCode: resErr.StatusCode,
-		Details:    resErr.Details,
 		Cause:      resErr,
 	}
 }
@@ -60,9 +60,8 @@ type PlayerService struct {
 
 // PlayerCacheEntry is the cached player payload.
 type PlayerCacheEntry struct {
-	UUID     string `json:"uuid"`
-	Username string `json:"username"`
-	Resolver string `json:"resolver"`
+	Player   *model.Player `json:"player"`
+	Resolver string        `json:"resolver"`
 }
 
 // NewPlayerService builds a PlayerService; strategy and resolvers are validated by config.
@@ -234,13 +233,22 @@ func (s *PlayerService) resolveRace(ctx context.Context, identifier string) (*Re
 	}()
 
 	resErrs := make([]*resolver.ResolverError, 0, len(s.resolvers))
+	notFoundCount := 0
 	for res := range resultCh {
 		if res.err == nil && res.player != nil {
-			cancel() // abort stragglers
+			cancel()
 			return s.freshResult(ctx, res.player, res.resolver), nil
 		}
 		if res.err != nil {
+			if res.err.Code == constant.CodeNotFound {
+				notFoundCount++
+			}
 			resErrs = append(resErrs, res.err)
+
+			if s.notFoundMinCount > 0 && notFoundCount >= s.notFoundMinCount {
+				cancel()
+				return s.failedResult(ctx, identifier, resErrs)
+			}
 		}
 	}
 
@@ -250,20 +258,29 @@ func (s *PlayerService) resolveRace(ctx context.Context, identifier string) (*Re
 // resolveFallback tries resolvers in order; first success wins.
 func (s *PlayerService) resolveFallback(ctx context.Context, identifier string) (*ResolveResult, *Error) {
 	resErrs := make([]*resolver.ResolverError, 0, len(s.resolvers))
+	notFoundCount := 0
 
 	for _, res := range s.resolvers {
 		player, err := s.safeResolve(ctx, res, identifier)
 		if err == nil && player != nil {
 			return s.freshResult(ctx, player, res.Name()), nil
 		}
-		resErrs = append(resErrs, wrapResolverError(res.Name(), err))
+
+		resErr := wrapResolverError(res.Name(), err)
+		if resErr.Code == constant.CodeNotFound {
+			notFoundCount++
+		}
+		resErrs = append(resErrs, resErr)
+
+		if s.notFoundMinCount > 0 && notFoundCount >= s.notFoundMinCount {
+			break
+		}
 	}
 
 	return s.failedResult(ctx, identifier, resErrs)
 }
 
-// safeResolve converts resolver panics into errors so they cannot escape singleflight,
-// and rejects invalid payloads so malformed upstream data is never served or cached.
+// safeResolve recover panic and reject malformed data
 func (s *PlayerService) safeResolve(ctx context.Context, res resolver.Resolver, identifier string) (p *model.Player, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -320,18 +337,17 @@ func (s *PlayerService) freshResult(ctx context.Context, player *model.Player, r
 func (s *PlayerService) failedResult(ctx context.Context, identifier string, resErrs []*resolver.ResolverError) (*ResolveResult, *Error) {
 	agg := resolver.AggregateErrors(resErrs, s.notFoundMinCount)
 
-	// 404 pairs a TTL-bearing stub with the error so handlers can set Cache-Control.
 	result := &ResolveResult{}
 	if agg.FinalCode == constant.CodeNotFound {
-		s.setPlayerNotFoundCache(ctx, identifier)
+		result.Resolver = strings.Join(notFoundReporters(resErrs), ",")
 		result.CacheTTL = s.negativeCacheTTL
+		s.setPlayerNotFoundCache(ctx, identifier, result.Resolver)
 	}
 
 	return result, &Error{
 		Code:       agg.FinalCode,
 		Message:    agg.FinalMessage,
 		StatusCode: agg.FinalStatus,
-		Details:    buildErrorDetails(resErrs),
 	}
 }
 
@@ -344,39 +360,43 @@ func internalErrorResult() *Error {
 	}
 }
 
-// buildErrorDetails maps resolver names to failure messages.
-func buildErrorDetails(resErrs []*resolver.ResolverError) map[string]string {
-	details := make(map[string]string)
+// notFoundReporters returns the deduplicated names of resolvers that reported NOT_FOUND
+func notFoundReporters(resErrs []*resolver.ResolverError) []string {
+	seen := make(map[string]struct{}, len(resErrs))
+	names := make([]string, 0, len(resErrs))
 	for _, err := range resErrs {
-		if err.Resolver == "" {
+		if err.Code != constant.CodeNotFound || err.Resolver == "" {
 			continue
 		}
-		details[err.Resolver] = err.Message
+		if _, dup := seen[err.Resolver]; dup {
+			continue
+		}
+		seen[err.Resolver] = struct{}{}
+		names = append(names, err.Resolver)
 	}
-	return details
+	return names
 }
 
-// playerCacheHit is one probe outcome; a nil entry is a not-found verdict.
 type playerCacheHit struct {
 	entry *PlayerCacheEntry
 	ttl   time.Duration
 }
 
-// cachedOutcome converts a probe hit; a not-found verdict pairs a stub result with the 404 error.
 func (s *PlayerService) cachedOutcome(hit *playerCacheHit) (*ResolveResult, *Error) {
-	if hit.entry == nil {
+	if hit.entry.Player == nil {
 		return &ResolveResult{
 			CacheHit: true,
 			CacheTTL: hit.ttl,
+			Resolver: hit.entry.Resolver,
 		}, &Error{
 			Code:       constant.CodeNotFound,
-			Message:    "Player not found (cached)",
+			Message:    "Player not found",
 			StatusCode: http.StatusNotFound,
 		}
 	}
 
 	return &ResolveResult{
-		Player:   &model.Player{UUID: hit.entry.UUID, Username: hit.entry.Username},
+		Player:   hit.entry.Player,
 		Resolver: hit.entry.Resolver,
 		CacheHit: true,
 		CacheTTL: hit.ttl,
@@ -400,16 +420,12 @@ func (s *PlayerService) getPlayerCache(ctx context.Context, key string) *playerC
 		return nil
 	}
 
-	// Negative verdicts are stored as a null payload.
-	if len(raw) == 0 || string(raw) == "null" {
+	// An empty payload cannot name reporters but still marks a negative verdict.
+	if len(raw) == 0 {
 		if s.negativeCacheTTL <= 0 {
 			return nil
 		}
-		return &playerCacheHit{ttl: ttl}
-	}
-
-	if s.cacheTTL <= 0 {
-		return nil
+		return &playerCacheHit{entry: &PlayerCacheEntry{}, ttl: ttl}
 	}
 
 	var entry PlayerCacheEntry
@@ -418,8 +434,20 @@ func (s *PlayerService) getPlayerCache(ctx context.Context, key string) *playerC
 		return nil
 	}
 
+	// A nil player payload is a not-found verdict.
+	if entry.Player == nil {
+		if s.negativeCacheTTL <= 0 {
+			return nil
+		}
+		return &playerCacheHit{entry: &entry, ttl: ttl}
+	}
+
+	if s.cacheTTL <= 0 {
+		return nil
+	}
+
 	// Parseable does not mean valid: treat a foreign or buggy entry as a miss.
-	if err := model.ValidatePlayer(&model.Player{UUID: entry.UUID, Username: entry.Username}); err != nil {
+	if err := model.ValidatePlayer(entry.Player); err != nil {
 		s.logger.Warn("corrupt player cache entry", "key", cacheKey, "error", err)
 		return nil
 	}
@@ -434,8 +462,7 @@ func (s *PlayerService) setPlayerCache(ctx context.Context, player *model.Player
 	}
 
 	data := &PlayerCacheEntry{
-		UUID:     player.UUID,
-		Username: player.Username,
+		Player:   &model.Player{UUID: player.UUID, Username: player.Username},
 		Resolver: resolverName,
 	}
 
@@ -450,14 +477,16 @@ func (s *PlayerService) setPlayerCache(ctx context.Context, player *model.Player
 }
 
 // setPlayerNotFoundCache writes a null verdict under the identifier key.
-func (s *PlayerService) setPlayerNotFoundCache(ctx context.Context, identifier string) {
+func (s *PlayerService) setPlayerNotFoundCache(ctx context.Context, identifier string, notFoundBy string) {
 	if s.negativeCacheTTL <= 0 {
 		return
 	}
 
 	keys := []string{s.cachePrefix + model.NormalizeIdentifier(identifier)}
 
-	if err := s.cache.SetCacheBulk(ctx, keys, nil, s.negativeCacheTTL); err != nil {
+	data := &PlayerCacheEntry{Resolver: notFoundBy}
+
+	if err := s.cache.SetCacheBulk(ctx, keys, data, s.negativeCacheTTL); err != nil {
 		s.logger.Warn("not-found cache write failed", "keys", keys, "error", err)
 	}
 }
