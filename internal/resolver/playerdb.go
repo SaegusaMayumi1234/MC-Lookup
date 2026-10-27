@@ -75,7 +75,7 @@ func (r *PlayerDBResolver) Resolve(ctx context.Context, identifier string) (*mod
 	}
 
 	return &model.Player{
-		UUID:     model.NormalizeUUID(data.Data.Player.ID),
+		UUID:     data.Data.Player.ID,
 		Username: data.Data.Player.Username,
 	}, nil
 }

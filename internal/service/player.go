@@ -262,7 +262,8 @@ func (s *PlayerService) resolveFallback(ctx context.Context, identifier string) 
 	return s.failedResult(ctx, identifier, resErrs)
 }
 
-// safeResolve converts resolver panics into errors so they cannot escape singleflight.
+// safeResolve converts resolver panics into errors so they cannot escape singleflight,
+// and rejects invalid payloads so malformed upstream data is never served or cached.
 func (s *PlayerService) safeResolve(ctx context.Context, res resolver.Resolver, identifier string) (p *model.Player, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -271,7 +272,23 @@ func (s *PlayerService) safeResolve(ctx context.Context, res resolver.Resolver, 
 		}
 	}()
 
-	return res.Resolve(ctx, identifier)
+	player, resolveErr := res.Resolve(ctx, identifier)
+	if resolveErr != nil {
+		return nil, resolveErr
+	}
+
+	if validateErr := model.ValidatePlayer(player); validateErr != nil {
+		return nil, fmt.Errorf("upstream returned invalid player data: %w", validateErr)
+	}
+
+	player.UUID = model.NormalizeUUID(player.UUID)
+
+	// Cross-check UUID lookups
+	if model.IsUUID(identifier) && player.UUID != model.NormalizeUUID(identifier) {
+		return nil, fmt.Errorf("upstream resolved UUID %q for requested UUID %q", player.UUID, model.NormalizeUUID(identifier))
+	}
+
+	return player, nil
 }
 
 // wrapResolverError normalizes a failure into *ResolverError; errors.As preserves typed codes.
@@ -290,7 +307,6 @@ func wrapResolverError(resolverName string, err error) *resolver.ResolverError {
 
 // freshResult normalizes the player, caches it, and returns a fresh resolver result.
 func (s *PlayerService) freshResult(ctx context.Context, player *model.Player, resolverName string) *ResolveResult {
-	player.UUID = model.NormalizeUUID(player.UUID)
 	s.setPlayerCache(ctx, player, resolverName)
 
 	return &ResolveResult{
@@ -398,6 +414,12 @@ func (s *PlayerService) getPlayerCache(ctx context.Context, key string) *playerC
 
 	var entry PlayerCacheEntry
 	if err := json.Unmarshal(raw, &entry); err != nil {
+		s.logger.Warn("corrupt player cache entry", "key", cacheKey, "error", err)
+		return nil
+	}
+
+	// Parseable does not mean valid: treat a foreign or buggy entry as a miss.
+	if err := model.ValidatePlayer(&model.Player{UUID: entry.UUID, Username: entry.Username}); err != nil {
 		s.logger.Warn("corrupt player cache entry", "key", cacheKey, "error", err)
 		return nil
 	}

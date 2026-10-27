@@ -73,7 +73,7 @@ func (r *MojangResolver) Resolve(ctx context.Context, identifier string) (*model
 	}
 
 	return &model.Player{
-		UUID:     model.NormalizeUUID(data.ID),
+		UUID:     data.ID,
 		Username: data.Name,
 	}, nil
 }

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -50,4 +51,20 @@ func NormalizeIdentifier(identifier string) string {
 		return NormalizeUUID(identifier)
 	}
 	return strings.ToLower(identifier)
+}
+
+// ValidatePlayer checks that a player record has a valid UUID and username.
+// It never compares the record to the requested identifier: upstreams may
+// still report a previous name after a rename.
+func ValidatePlayer(p *Player) error {
+	if p == nil {
+		return fmt.Errorf("nil player")
+	}
+	if !IsUUID(p.UUID) {
+		return fmt.Errorf("malformed UUID %q", p.UUID)
+	}
+	if !IsValidUsername(p.Username) {
+		return fmt.Errorf("malformed username %q", p.Username)
+	}
+	return nil
 }

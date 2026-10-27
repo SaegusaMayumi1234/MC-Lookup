@@ -65,7 +65,7 @@ func (r *MowojangResolver) Resolve(ctx context.Context, identifier string) (*mod
 	}
 
 	return &model.Player{
-		UUID:     model.NormalizeUUID(data.ID),
+		UUID:     data.ID,
 		Username: data.Name,
 	}, nil
 }

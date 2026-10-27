@@ -64,7 +64,7 @@ func (r *AshconResolver) Resolve(ctx context.Context, identifier string) (*model
 	}
 
 	return &model.Player{
-		UUID:     model.NormalizeUUID(data.UUID),
+		UUID:     data.UUID,
 		Username: data.Username,
 	}, nil
 }

@@ -485,3 +485,290 @@ func TestPositiveDisabledSkipsPlayerWrite(t *testing.T) {
 		t.Errorf("expected no player cache write with caching disabled, got %d", c.playerWrites())
 	}
 }
+
+// cannedPlayerResolver always resolves to the same canned player record,
+// including a deliberately invalid one when a test needs malformed output.
+type cannedPlayerResolver struct {
+	name   string
+	player *model.Player
+}
+
+func (c cannedPlayerResolver) Resolve(context.Context, string) (*model.Player, error) {
+	return c.player, nil
+}
+
+func (c cannedPlayerResolver) Name() string { return c.name }
+
+const dashedTestUUID = "069a79f4-44e9-4726-a91b-ef990e6b5624"
+
+// cannedNotch returns a valid player whose UUID is stored undashed: the
+// service must complete normalization before validating.
+func cannedNotch(name string) cannedPlayerResolver {
+	return cannedPlayerResolver{
+		name:   name,
+		player: &model.Player{UUID: "069a79f444e94726a91bef990e6b5624", Username: "Notch"},
+	}
+}
+
+// A resolver that returns a structurally invalid record — empty fields, a nil
+// player with nil error, an unnormalizable UUID — must lose the race to a
+// valid resolver, and only the valid record may reach the cache.
+func TestMalformedResolverIsSkippedInRace(t *testing.T) {
+	c := &stubCache{}
+	svc := NewPlayerService(
+		[]resolver.Resolver{
+			cannedPlayerResolver{name: "nil-player", player: nil},
+			cannedPlayerResolver{name: "empty-fields", player: &model.Player{}},
+			cannedPlayerResolver{name: "garbage-uuid", player: &model.Player{UUID: "zzzz79f4", Username: "Notch"}},
+			cannedNotch("good"),
+		},
+		constant.StrategyRace,
+		1,
+		c,
+		"test:",
+		time.Minute,
+		0,
+		nil,
+	)
+
+	result, resErr := svc.Resolve(context.Background(), "Notch")
+
+	if resErr != nil {
+		t.Fatalf("expected the valid resolver to win the race, got error: %v", resErr)
+	}
+	if result.Player == nil || result.Player.Username != "Notch" {
+		t.Errorf("expected the valid player, got %+v", result.Player)
+	}
+	if result.Resolver != "good" {
+		t.Errorf("expected resolver %q, got %q", "good", result.Resolver)
+	}
+	if c.playerWrites() != 1 {
+		t.Fatalf("expected exactly one player cache write, got %d", c.playerWrites())
+	}
+	written, ok := c.writes[0].data.(*PlayerCacheEntry)
+	if !ok {
+		t.Fatalf("expected a *PlayerCacheEntry write, got %T", c.writes[0].data)
+	}
+	if written.UUID != dashedTestUUID {
+		t.Errorf("expected the normalized UUID to be cached, got %q", written.UUID)
+	}
+}
+
+// Same as the race case in fallback: an invalid record must not win, the next
+// resolver is tried instead.
+func TestMalformedResolverIsSkippedInFallback(t *testing.T) {
+	c := &stubCache{}
+	svc := NewPlayerService(
+		[]resolver.Resolver{
+			cannedPlayerResolver{name: "empty-fields", player: &model.Player{}},
+			cannedNotch("good"),
+		},
+		constant.StrategyFallback,
+		1,
+		c,
+		"test:",
+		time.Minute,
+		0,
+		nil,
+	)
+
+	result, resErr := svc.Resolve(context.Background(), "Notch")
+
+	if resErr != nil {
+		t.Fatalf("expected fallback to reach the valid resolver, got error: %v", resErr)
+	}
+	if result.Resolver != "good" {
+		t.Errorf("expected resolver %q, got %q", "good", result.Resolver)
+	}
+	if c.playerWrites() != 1 {
+		t.Fatalf("expected exactly one player cache write, got %d", c.playerWrites())
+	}
+	written, ok := c.writes[0].data.(*PlayerCacheEntry)
+	if !ok {
+		t.Fatalf("expected a *PlayerCacheEntry write, got %T", c.writes[0].data)
+	}
+	if written.Resolver != "good" {
+		t.Errorf("expected the valid resolver to be cached, got %q", written.Resolver)
+	}
+}
+
+// When no resolver produces a valid record, the outcome is UPSTREAM_ERROR with
+// per-resolver detail, and nothing is written to the cache.
+func TestAllMalformedResolversAggregateAsUpstreamError(t *testing.T) {
+	c := &stubCache{}
+	svc := newTestService(
+		[]resolver.Resolver{
+			cannedPlayerResolver{name: "empty-fields", player: &model.Player{}},
+			cannedPlayerResolver{name: "garbage-uuid", player: &model.Player{UUID: "zzzz79f4", Username: "Notch"}},
+		},
+		constant.StrategyFallback,
+	)
+
+	_, resErr := svc.Resolve(context.Background(), "Notch")
+
+	if resErr == nil {
+		t.Fatal("expected an aggregate error when every resolver returns invalid data")
+	}
+	if resErr.Code != constant.CodeUpstreamError {
+		t.Errorf("expected code %q, got %q", constant.CodeUpstreamError, resErr.Code)
+	}
+	for _, name := range []string{"empty-fields", "garbage-uuid"} {
+		if _, ok := resErr.Details[name]; !ok {
+			t.Errorf("expected details entry for resolver %q, got %v", name, resErr.Details)
+		}
+	}
+	if c.playerWrites() != 0 {
+		t.Errorf("expected no player cache write, got %d", c.playerWrites())
+	}
+}
+
+// In race mode the first *valid* record wins, so a malformed resolver's
+// failure must not abort the race for the others.
+func TestMalformedResolverFailureKeepsRaceAlive(t *testing.T) {
+	svc := newTestService(
+		[]resolver.Resolver{
+			cannedPlayerResolver{name: "empty-fields", player: &model.Player{}},
+			cannedNotch("good"),
+		},
+		constant.StrategyRace,
+	)
+
+	result, resErr := svc.Resolve(context.Background(), "Notch")
+
+	if resErr != nil {
+		t.Fatalf("expected the race to still find a valid resolver, got error: %v", resErr)
+	}
+	if result.Resolver != "good" {
+		t.Errorf("expected resolver %q, got %q", "good", result.Resolver)
+	}
+}
+
+// UUIDs are immutable, so a UUID lookup that resolves to a different UUID
+// proves the upstream served a foreign record: the result must be treated as
+// an upstream failure, and nothing is cached.
+func TestUUIDLookupRejectsMismatchedUUID(t *testing.T) {
+	c := &stubCache{}
+	requested := "069a79f4-44e9-4726-a91b-ef990e6b5624"
+	svc := NewPlayerService(
+		[]resolver.Resolver{
+			cannedPlayerResolver{name: "mismatched", player: &model.Player{
+				UUID:     "069a79f4-44e9-4726-a91b-ef990e6b5625",
+				Username: "Notch",
+			}},
+		},
+		constant.StrategyFallback,
+		1,
+		c,
+		"test:",
+		time.Minute,
+		0,
+		nil,
+	)
+
+	_, resErr := svc.Resolve(context.Background(), requested)
+
+	if resErr == nil {
+		t.Fatal("expected the mismatched UUID to surface as an error")
+	}
+	if resErr.Code != constant.CodeUpstreamError {
+		t.Errorf("expected code %q, got %q", constant.CodeUpstreamError, resErr.Code)
+	}
+	if _, ok := resErr.Details["mismatched"]; !ok {
+		t.Errorf("expected details entry for resolver \"mismatched\", got %v", resErr.Details)
+	}
+	if c.playerWrites() != 0 {
+		t.Errorf("expected no player cache write, got %d", c.playerWrites())
+	}
+}
+
+// UUID lookups resolving to the requested UUID are valid regardless of the
+// returned name.
+func TestUUIDLookupAcceptsRequestedUUID(t *testing.T) {
+	svc := newTestService(
+		[]resolver.Resolver{
+			cannedPlayerResolver{name: "matching", player: &model.Player{
+				UUID:     dashedTestUUID,
+				Username: "Renamed",
+			}},
+		},
+		constant.StrategyFallback,
+	)
+
+	result, resErr := svc.Resolve(context.Background(), dashedTestUUID)
+
+	if resErr != nil {
+		t.Fatalf("expected success, got error: %v", resErr)
+	}
+	if result.Resolver != "matching" {
+		t.Errorf("expected resolver %q, got %q", "matching", result.Resolver)
+	}
+	if result.Player == nil || result.Player.Username != "Renamed" {
+		t.Errorf("expected the resolver's username, got %+v", result.Player)
+	}
+}
+
+// Username lookups get NO name cross-check on purpose: upstreams propagate
+// name changes at different speeds, so a fresh rename may still resolve to the
+// previous name. That result is valid and must be served and cached.
+func TestUsernameLookupDoesNotCrossCheckName(t *testing.T) {
+	c := &stubCache{}
+	svc := NewPlayerService(
+		[]resolver.Resolver{
+			cannedPlayerResolver{name: "stale-name", player: &model.Player{
+				UUID:     dashedTestUUID,
+				Username: "OldName",
+			}},
+		},
+		constant.StrategyFallback,
+		1,
+		c,
+		"test:",
+		time.Minute,
+		0,
+		nil,
+	)
+
+	result, resErr := svc.Resolve(context.Background(), "NewName")
+
+	if resErr != nil {
+		t.Fatalf("expected the stale name to be accepted, got error: %v", resErr)
+	}
+	if result.Player == nil || result.Player.Username != "OldName" {
+		t.Errorf("expected the stale username to be served, got %+v", result.Player)
+	}
+	if c.playerWrites() != 1 {
+		t.Errorf("expected the stale-name result to be cached, got %d", c.playerWrites())
+	}
+}
+
+// A cache entry that parses but violates the player shape must be treated as
+// a miss: resolution falls through to the resolvers and repairs the keyspace
+// with a valid write.
+func TestCorruptCacheEntryShapeIgnored(t *testing.T) {
+	c := &stubCache{raw: []byte(`{"uuid":"069a79f4-44e9-4726-a91b-ef990e6b5624","username":"","resolver":"stored"}`)}
+	svc := NewPlayerService(
+		[]resolver.Resolver{cannedNotch("good")},
+		constant.StrategyFallback,
+		1,
+		c,
+		"test:",
+		time.Minute,
+		0,
+		nil,
+	)
+
+	result, resErr := svc.Resolve(context.Background(), "Notch")
+
+	if resErr != nil {
+		t.Fatalf("expected the invalid entry to be treated as a miss, got error: %v", resErr)
+	}
+	if result.CacheHit {
+		t.Error("expected a resolver result, not a cache hit")
+	}
+	if result.Resolver != "good" {
+		t.Errorf("expected resolver %q, got %q", "good", result.Resolver)
+	}
+	if c.playerWrites() != 1 {
+		t.Errorf("expected the re-resolve to overwrite the corrupt entry, got %d writes", c.playerWrites())
+	}
+}
