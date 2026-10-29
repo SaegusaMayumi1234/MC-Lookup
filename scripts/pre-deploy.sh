@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Pre-deploy helper: materialize config.yaml from config.example.yaml.
 
 set -euo pipefail
