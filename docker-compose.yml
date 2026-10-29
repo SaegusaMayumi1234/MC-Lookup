@@ -7,28 +7,10 @@ services:
     # ports:
     #   - "${APP_PORT:-8080}:8080"
     environment:
-      REDIS_ADDR: redis:6379
+      REDIS_ADDR: vps3:6379
       API_PORT: "8080"
       # Uncomment to disable the Swagger endpoints (/ and /api/openapi.yaml):
       # APP_ENV: prod
     volumes:
       # Your local config wins over the baked-in example config.
       - ./config.yaml:/app/config.yaml:ro
-    depends_on:
-      redis:
-        condition: service_healthy
-
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
-    volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
-volumes:
-  redis-data:
