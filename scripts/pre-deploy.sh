@@ -1,9 +1,16 @@
 #!/bin/sh
 # Pre-deploy helper: materialize config.yaml from config.example.yaml.
 
-set -euo pipefail
+set -eu
+
+echo "Working directory before cd: $(pwd)"
+echo "Script location: $0"
 
 cd "$(dirname "$0")/.."
+
+echo "Working directory after cd: $(pwd)"
+echo "Directory contents:"
+ls -la
 
 if [ -f config.yaml ]; then
     echo "config.yaml already exists — leaving it untouched."
